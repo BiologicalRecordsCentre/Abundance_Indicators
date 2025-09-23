@@ -34,8 +34,6 @@ This dataset contains pre-smoothed the species trends. We have checked the warni
 - Bats, which were pre-smoothed.
 - for two species with only two years of data
 - where the smoother failed (both species have only three years of data)
-- A small number of cases (n=25 species:year combinations) where the fitted count is negative
-- NB in previous runs we did not pre-smooth the vascular plant trends. This has changed.
 
 ## Get the models
 ```{r setPars}
