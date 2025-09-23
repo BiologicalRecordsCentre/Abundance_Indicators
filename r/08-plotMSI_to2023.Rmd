@@ -1,0 +1,178 @@
+---
+title: "English abundance index"
+author: "Nick Isaac, original"
+date: "2024-03-22, original date"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+---
+
+We have run the Freeman method for multiple groups on a dataset of pre-smoothed index values (on the log scale).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(coda)
+library(ggplot2)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(scales)
+library(BRCindicators)
+```
+
+
+# Read in the model files
+```{r readData, include = FALSE}
+modeldir <- "results23/all_species" # Freeman output model location
+```
+
+This dataset contains pre-smoothed the species trends. We have checked the warnings and found there is no real problem here. We have used the smoothed trends except for:
+- Bats, which were pre-smoothed.
+- for two species with only two years of data
+- where the smoother failed (both species have only three years of data)
+- A small number of cases (n=25 species:year combinations) where the fitted count is negative
+- NB in previous runs we did not pre-smooth the vascular plant trends. This has changed.
+
+## Get the models
+```{r setPars}
+modelfiles <- list.files(modeldir, recursive = TRUE, patt = ".rds")
+head(modelfiles)
+```
+
+## load the models
+```{r}
+output <- lapply(modelfiles, function(modfilename){
+ readRDS(file.path(modeldir, modfilename)) 
+})
+```
+
+## Get the metadata
+Extract the metadata from all the model runs into a dataframe
+```{r}
+pars <- lapply(output, function(mod){
+  md <- attr(mod, "metadata")
+})
+pars <- do.call(rbind, pars)
+```
+
+## Explore and combine
+Has it converged?
+```{r}
+MCMCStats <- lapply(output, function(msi) {
+  dat <- attr(msi, "model")$summary
+  dat[!grepl("^M", dimnames(dat)[[1]]),8]
+})
+pars$Rhat3q <- sapply(MCMCStats, quantile, 0.75, na.rm=TRUE)
+```
+
+
+Combine them all together
+```{r}
+df <- do.call(rbind, output)
+attr(df, "model") <- NULL
+attr(df, "metadata") <- NULL
+```
+
+
+Now coerce the output into a useful format:
+```{r Manipulate}
+pars$nyr <- c(sapply(output, nrow))
+
+df$group <- melt(mapply(rep, pars$group, pars$nyr))$value
+df$ypk <- melt(mapply(rep, pars$ypk, pars$nyr))$value
+df$n.knots <- melt(mapply(rep, pars$n.knots, pars$nyr))$value
+df$ypk <- factor(df$ypk)
+```
+
+Save the data to send to Defra who produce the plots from the csv files
+```{r}
+write.csv(df,  file = file.path(modeldir, "MSI|group+_presmooth_allspp_to2023.csv"))
+write.csv(pars, file = file.path(modeldir, "SmoothingParameters_allspp_to2023.csv"))
+```
+
+# Species-level trends
+
+We first need to identify the two "all species" runs
+```{r}
+getSpTrends <- function(name, n = 0){
+  # `n` is an optional variable determing the number of years over which to estimate the trend
+  # if zero then the full series is used. If an integer above zero then the final `n` years of the series is used 
+  mod <- attr(output[[grep(name, modelfiles)]], "model")
+  spg <- mod$mean$spgrowth
+  estimate <- mod$data$estimate # the raw data. Has one more column than spg
+
+  if(n > 0){
+    # short term assessment. Restrict spg to the last n years
+    N <- dim(spg)[2]
+    spg <- spg[,(N-n):N]
+    estimate <- estimate[,(N-n):N]
+  } else {
+    estimate <- estimate[,-1]
+  }
+  
+  spMGR <- sapply(1:nrow(spg), function(i){
+    rates <- spg[i,!is.na(estimate[i,])]
+    mean(rates[-1]) # ignore first value - this is the first year with data so the GR is from other species
+  })
+  
+  names(spMGR) <- dimnames(estimate)[[1]]
+  100*(exp(spMGR)-1)
+}
+
+spTrends <- lapply(c(0,5), function(n){
+  x<-as.data.frame(do.call(cbind, lapply(list("all_3", "all_10"), getSpTrends, n=n)))
+  names(x) <- paste0(c("ypk3", "ypk10"), "_",n)
+  x
+})
+spTrends <- do.call(cbind, spTrends)
+head(spTrends)
+```
+
+The `ypk3_0` column is the long term trend when smoothed with three knots per year.
+The `ypk10_5` column is the short term trend (last 5 years) when smoothed with ten knots per year.
+etc etc.
+
+All trends are measured as the mean across years, converted to a percentage increase/decrease in abundance
+
+Take a look at the overall distribution
+```{r}
+ggplot(data=melt(spTrends)) + 
+  geom_freqpoly(aes(value, col=variable), bins = 25) +
+  xlab("species trend (%/yr)") +
+  xlim(c(-30,30))+
+  theme_bw()
+```
+
+## Categories of change
+
+Get the group identity and summarise into categories and report the values for each group
+```{r}
+data1 <- read.csv("../../data/d4a_spp_ts_engto23_Smoothed_unsmVP.csv")
+
+spTrends$group <- data1$group[match(rownames(spTrends), data1$species)]
+spTrends$survey <- data1$survey[match(rownames(spTrends), data1$species)]
+
+spTrends$longTrendCat <- cut(spTrends$ypk3_0, 
+                         breaks = c(-Inf, -2.73, -1.14, +1.16, +2.81, Inf),
+                         labels = c("Strong decrease", "Weak decrease", "Little change", "Weak increase", "Strong increase"))
+summary(spTrends$longTrendCat)
+
+spTrends$shortTrendCat <- cut(spTrends$ypk3_5, 
+                         breaks = c(-Inf, -2.73, -1.14, +1.16, +2.81, Inf),
+                         labels = c("Strong decrease", "Weak decrease", "Little change", "Weak increase", "Strong increase"))
+summary(spTrends$shortTrendCat)
+
+with(spTrends, table(group, longTrendCat))
+with(spTrends, table(group, shortTrendCat))
+
+
+write.csv(spTrends, file = file.path(modeldir,"spTrends_allspp_to2023.csv")) # unsm VP cat chg
+```
+
+
+
+

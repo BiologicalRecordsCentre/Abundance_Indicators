@@ -1,0 +1,157 @@
+---
+title: "run Freeman By Group"
+author: "Nick Isaac"
+date: "2024-02-28"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+We're going to run the Freeman method
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(devtools)
+library(BRCindicators)
+library(jagsUI)
+library(ggplot2)
+library(reshape2)
+```
+
+Load in the data.
+
+```{r readData}
+datadir <- "/data/tidy_data/2025" 
+
+# to use unsmoothed VP time-series
+data <- read.csv(file = file.path(datadir,"d4a_spp_ts_engto23_Smoothed_unsmVP.csv")) 
+```
+
+Use smoothing on the log scale (`index2`).
+
+```{r}
+logSmoothing <- TRUE
+if(logSmoothing){
+  data$index <- data$index2
+} else {
+  data$index <- data$index1
+}
+```
+
+As there is no fish data for 2020, we need to add an empty year in 2020. If we 
+don't do this, the model will incorrectly believe that 2022 is actually 2021. 
+Just need to do this for a single species, so we use Sprattus sprattus.
+
+```{r}
+data <- rbind(data[,c("species", "year", "group", "index")], 
+              data.frame(species = "Sprattus sprattus", 
+                               year = 2020,
+                               group = "fish",
+                               index = NA))
+```
+
+First, define a function to run the models for a particular set of data
+
+```{r runFreeman, include=FALSE, echo=TRUE}
+runFreeman <- function(gr, ypk, save = TRUE, runShort = TRUE, nit=5000, spTrends = FALSE){
+                       
+                       if(gr == "all") {
+                         inddat <- data[,c("species","year", "index")]
+                       } else {
+                         inddat <- subset(data, group==gr, select = c("species","year", "index"))
+                       }
+
+                       n.yr    <- length(unique(inddat$year))
+                       n.knots <- round(n.yr / ypk)
+                       print(paste0(gr, ": ", ypk, " years per knot. With ",n.yr, " years of data = ", n.knots," knots overall"))
+
+                       if(runShort & n.knots == 1) {
+                         n.knots <- 2
+                         print("running with two knots")
+                       }
+                       
+                       if(n.knots > 1){
+                   
+                         mod <- bma(data = inddat, 
+                                 num.knots = n.knots,
+                                 parallel = TRUE,
+                                 plot = FALSE,
+                                 n.iter = nit,
+                                 save.sppars = spTrends)
+                       
+                         md <- data.frame(group = gr,
+                                  ypk = ypk,
+                                  n.knots = n.knots,
+                                  n.it = nit)
+                         attr(mod, "metadata") <- md
+
+                        if(save){
+                         letter <- ifelse(logSmoothing, "L","M")
+                          #saveRDS(mod, file=paste0("results/", gr, "_",
+                          saveRDS(mod, file=paste0("results23/all_species/", gr, "_",
+                                                 ypk,"ypk_",letter,"_",
+                                                  nit/1000,"kit_",
+                                                  format(Sys.Date(),"%y%m%d"),".rds"))
+                         return(NULL)
+                       } else {
+                         return(mod)
+                       }
+                       } else {
+                         print("only one knot: skipping")
+                       }
+                       
+}
+```
+
+Define some simple parameters for the model runs.
+
+```{r setPars}
+taxa <- unique(data$group)
+# set the number of years per knot
+ypk <- c(10, 3)
+```
+
+Run the vascular plants using the unsmoothed species time-series.
+
+First, we'll run this for all the groups except moths
+
+```{r, echo=FALSE}
+p <- expand.grid(ypk = ypk, gr = setdiff(taxa, c("moths", "fish")))
+system.time({
+    output_group <- mapply(ypk = p$ypk, gr = p$gr, runFreeman, SIMPLIFY = FALSE, save = TRUE)
+})
+```
+
+Runtime varies with number of species and length of time-series.
+
+Now for the moths
+
+```{r, echo=FALSE}
+system.time({
+    output_group <- sapply(ypk, runFreeman, gr = "moths", save = TRUE)
+})
+```
+
+Each run of the moths takes just over 30 minutes
+
+Now the all the species MSI. For this we want to save the species
+trends.
+
+```{r, echo=FALSE}
+system.time({
+    output_group <- sapply(ypk, runFreeman, gr = "all", save = TRUE, spTrends = TRUE)
+})
+```
+
+Just over an hour each (a bit slower if saving species parameters)
+
+Finally, we'll rerun each group with one knot for every year of data.
+
+```{r}
+system.time({
+    output_group <- sapply(c(taxa, "all"), runFreeman, ypk = 1, save = TRUE, spTrends = FALSE)
+})
+```
+
