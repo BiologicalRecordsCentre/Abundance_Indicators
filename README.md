@@ -1,2 +1,2 @@
 # Abundance Indicator 
-Core scripts to produce the Indicators of species abundance in England.
+Core scripts to produce the Indicators of species abundance.
