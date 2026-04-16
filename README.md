@@ -1,2 +1,2 @@
 # Abundance Indicator 
-Core scripts to produce the Indicators of species abundance.
+This repository holds the core scripts to produce the [Indicators of species abundance in England publication](https://www.gov.uk/government/statistics/indicators-of-species-abundance-in-england), which includes the all-species and priority species indicators. A new version will be uploaded here each year when the publication is updated – please see the [Releases](https://github.com/BiologicalRecordsCentre/Abundance_Indicators/releases) tab for past versions of the indicator. You can additionally find scripts to run the [UK version](https://jncc.gov.uk/our-work/ukbi-priority-species-abundance/) of the priority species indicator. 
