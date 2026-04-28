@@ -1,0 +1,353 @@
+---
+title: "09-cf to2024 and to2023"
+author: "fiona burns"
+date: "25.02.2025"
+output:
+  html_document:
+    df_print: paged
+root.dir: /data
+---
+
+This script looks at the compiled dataset of species time-series and the resulting indicators for this year's publication and compares them to the equivalent datasets from last year to give a visual assessment of whether there are substantial differences barring the additional an extra year of data. 
+
+Any differences found are then investigated to see if they can be traced back to the input datasets of species time-series or whether they have been introduced by the indicator pipeline. If the input data are found to differ then data providers are consulted to better understand why species time-series follow a different trajetory in the latest iteration. Any differences due to processing are investigated and rectified before re-running the pipeline and checking they plots again.
+
+load in libraries
+```{r, message=FALSE}
+library(reshape);library(plyr);library(dplyr);library(ggplot2);library(stringr);library(readxl); library(tidyr);library(ggforce);library(Cairo)
+```
+
+read in tidying functions
+```{r}
+source("/data/notebooks/rstudio-esaiukpsi26/tidy_functions.R")#
+```
+
+input and output folders
+```{r}
+#folders to write to
+fig_dir  <- "/data/notebooks/rstudio-esaiukpsi26/england/species_d4a/figures/"
+qa_out   <- "/data/notebooks/rstudio-esaiukpsi26/england/species_d4a/results/qa/"
+
+#folders to write from
+ind_data <- "/data/notebooks/rstudio-esaiukpsi26/england/species_d4a/results/"
+spp_data <- "/data/tidy_data/"
+last_yr  <- "/data/last_yr_results"
+```
+
+
+### cf unsmoothed species time series
+
+read in compiled data
+```{r}
+to24_un <- read.csv("/data/tidy_data/d4_spp_timeseries_engto24_120326.csv")
+to23_un <- read.csv(file = file.path(last_yr, "d4_spp_timeseries_engto23.csv"))
+```
+
+#### Freshwater Invertebrates
+
+Plots for QA - FW Invertebrates flagged as being slightly different from previous iteration
+```{r, eval=FALSE}
+fw <- to24_un %>% 
+  mutate(index_m23 = to23_un$index_m[match(paste(species, year), 
+                                        paste(to23_un$species, to23_un$year))]) %>% 
+  filter(group == "fw invertebrates")
+
+ nfw <- n_distinct(fw$species)
+
+Cairo::CairoPDF(file = paste0(fig_dir, "un_cf_to23to24_fw.pdf"))
+for(jj in 1:ceiling(nfw/9)){
+  pmain = ggplot(fw, aes(x = year)) +
+    geom_line(aes(y = index_m), col = "darkgreen", show.legend = FALSE, na.rm = TRUE) +
+    geom_point(aes(y = index_m), col = "darkgreen", size = .2, show.legend = FALSE,na.rm = TRUE ) + 
+    geom_line(aes(y = index_m23), col = "blue", show.legend = FALSE, na.rm = TRUE ) + 
+    geom_point(aes(y = index_m23), size = .2, col = "blue") +
+    labs(x = "year", y = "Index") + 
+    facet_wrap_paginate( ~ species, ncol = 3, nrow = 3, page = jj, scales = "free_y")
+  print(pmain)
+} 
+```
+
+#### All species
+
+Rescale relative to first year to allow direct cf. This is not ideal as if the first year is slightly different the full time series can look divergent, but it gives a good approximation in the majority of cases.
+
+Combine datasets and estimate difference in the index value for each species in each year for the two datasets.
+
+```{r}
+to23_un <- to23_un %>% 
+  dplyr::rename(scientific_name = species) %>%
+  mutate(index = exp(index)) %>% 
+  rescale(ind_col = index, Index_root = 1) %>% 
+  mutate(scientific_name = str_to_lower(scientific_name))
+
+un_cf   <- to24_un %>% 
+  dplyr::rename(scientific_name = species) %>% 
+  mutate(index = exp(index)) %>% 
+  rescale(ind_col = index, Index_root = 1) %>% 
+  mutate(index23  = to23_un$index[match(paste(scientific_name, year), 
+                                        paste(to23_un$scientific_name, to23_un$year))]) %>% 
+  mutate(diff     = (index - index23)/index * 100) %>% 
+  mutate(diff_big = ifelse(abs(diff) > 15, 0, NA)) %>% 
+  arrange(group, scientific_name) %>% 
+  mutate(scientific_name = factor(scientific_name, levels = unique(scientific_name))) %>% 
+  select(-Index_unscaled)
+
+spp_diff <- un_cf %>% 
+  filter(abs(diff) > 20) %>% 
+  group_by(scientific_name) %>% 
+  summarise(spp = unique(scientific_name),
+            grp = unique(group))
+
+#tabulate big differences - taken as over 15%, could use other thresholds 
+inst_diff_un <- un_cf %>% 
+  filter(abs(diff) > 15) %>% 
+  group_by(group) %>% 
+  summarise(ninstances = n())
+
+spp_diff_un <- un_cf %>% 
+  filter(diff > 15) %>% 
+  group_by(group) %>% 
+  summarise(spp = n_distinct(scientific_name))
+```
+
+
+Plot time-series per species and highlight big differences
+
+Potential development option: These plots are taking a long time to save. Should consider alternate options.
+
+```{r, eval=FALSE}
+nspecies <- n_distinct(un_cf$scientific_name)
+
+pdf(paste0(fig_dir, "allsppd4a_un_cf_to23to24_130326.pdf"), useDingbats = FALSE) 
+for(jj in 1:ceiling(nspecies/9)){
+    #spp_page <- species_list[((jj-1)*9+1):min(jj*9, length(species_list))] #Identify the 9 species to plot on the current page of the PDF
+    #dat <- un_cf[un_cf$scientific_name %in% spp_page, ]#Subset the main dataset to include only the species for this page
+    pmain = ggplot(un_cf, aes(x = year)) +
+    geom_line(aes(y = index, col = group), show.legend = FALSE, na.rm = TRUE) +
+    geom_point(aes(y = index, col = group), size = .2, show.legend = FALSE, na.rm = TRUE) + 
+    geom_point(aes(y = index23), col = "blue", size = .1, show.legend = FALSE, na.rm = TRUE) + 
+    geom_point(aes(y = diff_big), size = .5, pch = 18) +
+    labs(x = "year", y = "Index") + 
+    facet_wrap_paginate( ~ group + scientific_name, ncol = 3, nrow = 3, page = jj, scales = "free_y")
+  print(pmain)
+}
+```
+
+#### Plants
+
+```{r, eval=FALSE}
+nplants <- n_distinct(un_cf$scientific_name[un_cf$group == "vascular plants"])
+pdf(paste0(fig_dir, "un_cf_to23to24_VP.pdf", useDingbats = FALSE))
+for(jj in 1:ceiling(nplants/9)){
+  pmain = ggplot(filter(un_cf, group == "vascular plants"), aes(x = year)) +
+    geom_line(aes(y = index, col = group), show.legend = FALSE, na.rm = TRUE) +
+    geom_point(aes(y = index, col = group), size = .2, show.legend = FALSE,na.rm = TRUE ) + 
+    geom_point(aes(y = index23), col = "blue", size = .1, show.legend = FALSE, na.rm = TRUE ) + 
+    geom_point(aes(y = diff_big), size = .5, pch = 18) +
+    labs(x = "year", y = "Index") + 
+    facet_wrap_paginate( ~ group + scientific_name, ncol = 3, nrow = 3, page = jj, scales = "free_y")
+  print(pmain)
+}
+```
+
+#### Birds
+
+```{r, eval=FALSE}
+#plot bird separately for QA
+nbirds <- n_distinct(un_cf$scientific_name[un_cf$group == "birds"])
+CairoPDF(paste0(fig_dir, "species_d4a_uncf_to23to24_birds.pdf"))
+for(jj in 1:ceiling(nbirds/9)){
+  pmain = ggplot(filter(un_cf, group == "birds"), aes(x = year)) +
+    geom_line(aes(y = index, col = group), show.legend = FALSE, na.rm = TRUE) +
+    geom_point(aes(y = index, col = group), size = .2, show.legend = FALSE,na.rm = TRUE ) + 
+    geom_point(aes(y = index23), col = "blue", size = .1, show.legend = FALSE, na.rm = TRUE ) + 
+    geom_point(aes(y = diff_big), size = .5, pch = 18) +
+    labs(x = "year", y = "Index") + 
+    facet_wrap_paginate( ~ scientific_name, ncol = 3, nrow = 3, page = jj, scales = "free_y")
+  print(pmain)
+}
+```
+
+Differences to2024 updated 05.03.26
+
+- Birds
+
+  - Species               dataset   source
+  - Reed warbler          WBI       WBBSWBSC
+  - Teal                  WBI       WBBSBBS
+  - Tufted Duck           WBI       WBBSWBSC  
+  - Dipper                WBI       WBBSWBS
+  - Mute swan             WBI       WBBSWBSC
+  - Eurasian Coot         WBI       WBBSWBSC
+  - Common snipe          WBI       WBBSWBSC  
+  - Goosander             WBI       WBBSWBS
+  - Grey wag              WBI       WBBSWBS
+  - Curlew                WBI       WBBSWBS
+  - Sand martin           WBI       WBSWBSC
+  - Little grebe          WBI       WBBSWBSC
+
+Nearly all the birds with differences in this year's dataset compared to last years derive some of their information from the Waterways breeding bird survey (WBBS). I believe the methods for combining WBBS with other data sources has been updated. FB checked with BTO and confirmed this to be the case. The current dataset is based on the updated method and there are no concerns.
+
+  - H sparrow             WBI       Explained by different start year, previously started in 1970, this year's time-series starts from 1976. Confirmed this is an updated analytical choice by BTO.
+  - Golden Plover         upland    small sample size likely to vary year to year
+  - Scaup                 WWBI      checked data, same start year, quite different values
+
+As we have decided to use the version of the seabird timeseries from the WBI all species (anchored to operation seafarer in 1970) rather than the seabird indicator (based only on SMP and starting in 1986) the start years are mismatched for Fulmar, Herring gull, Shag, Cormorant,  Kittiwake, Common/Arctic/Little/Sandwich Tern, Guillemot, explaining the differences observed in the two datasets for these species
+
+- Butterflies 
+  - Black hairstreak - Satyrium pruni - think fine
+  - Large blue - Maculinea arion (Reintroduced so has had very large increase and large interannual variations)
+
+- Fish
+  - Lesser sand eel - Ammodytes tobianus - data sparse in final years
+
+- FW Inv
+
+Nearly all are different, this matches submitted data. Flagged with QMUL. They used an updated analytical process this year, which explains the differences observed. They removed sites with sparse data given there is now a longer time-series. No concerns here.
+
+- Vascular plants
+
+Lots quite diff, but we expect this as data this year is at England level rather than UK level
+This also means ten new species and one fewer species of plant in the dataset (the latter being Sea arrowgrass)
+
+
+
+### cf smoothed species time-series
+
+read in smoothed data
+```{r}
+to24_sm <- read.csv(file = file.path(spp_data, "d4a_spp_ts_engto24_Smoothed_smVP_120326.csv"))
+to23_sm <- read.csv(file = file.path(last_yr,  "d4a_spp_ts_engto23_Smoothed_smVP.csv"))
+```
+
+rescale to allow direct cf.
+combine datasets and estimate difference
+
+```{r}
+to23_sm <- to23_sm %>% 
+  dplyr::rename(scientific_name = species) %>%
+  mutate(index = exp(index2)) %>% 
+  rescale(ind_col = index, Index_root = 1) %>% 
+  mutate(scientific_name = str_to_lower(scientific_name))
+
+sm_cf   <- to24_sm %>% 
+  dplyr::rename(scientific_name = species) %>% 
+  mutate(index = exp(index2)) %>% 
+  rescale(ind_col = index, Index_root = 1) %>% 
+  mutate(index23  = to23_sm$index[match(paste(scientific_name, year), paste(to23_sm$scientific_name, to23_sm$year))]) %>% 
+  mutate(diff     = (index - index23)/index * 100) %>% 
+  mutate(diff_big = ifelse(abs(diff) > 15, 0, NA)) %>% 
+  arrange(group, scientific_name) %>% 
+  mutate(scientific_name = factor(scientific_name, levels = unique(scientific_name))) %>% 
+  select(-Index_unscaled)
+
+spp_diff_sm <- sm_cf %>% 
+  filter(abs(diff) > 15) %>% 
+  group_by(scientific_name) %>% 
+  summarise(spp = unique(scientific_name),
+            grp = unique(group))
+
+#tabulate big differences - taken as over 15%, could use other thresholds 
+inst <- sm_cf %>% 
+  filter(abs(diff) > 15) %>% 
+  group_by(group) %>% 
+  summarise(ninstances = n())
+
+a <- sm_cf %>% 
+  filter(diff > 15) %>% 
+  group_by(group) %>% 
+  summarise(spp = n_distinct(scientific_name))
+```
+
+plot time-series per species and highlight big differences
+```{r, eval=FALSE}
+nspecies <- n_distinct(sm_cf$scientific_name)
+#group by group
+CairoPDF(paste0(fig_dir, "speciesd4a_sm_cf_to23to24_130326.pdf", useDingbats = FALSE))
+for(jj in 1:ceiling(nspecies/9)){
+  pmain = ggplot(sm_cf, aes(x = year)) + 
+    geom_line(aes(y = index, col = group), show.legend = FALSE, na.rm = TRUE) +
+    geom_point(aes(y = index, col = group), size = .1, show.legend = FALSE, na.rm = TRUE) +
+    geom_point(aes(y = index23), col = "blue", size = .1, show.legend = FALSE, na.rm = TRUE) + 
+    geom_point(aes(y = diff_big), size = .4, pch = 18) +
+    labs(x = "year", y = "Index") + 
+    facet_wrap_paginate( ~ group + scientific_name, ncol = 3, nrow = 3, page = jj, scales = "free_y")
+  print(pmain)
+}
+```
+
+```{r, eval=FALSE}
+pm <- ggplot(sm_cf, aes(x = year)) + 
+    geom_line(aes(y = index, col = group), show.legend = FALSE, na.rm = TRUE) +
+    geom_point(aes(y = index23), col = "blue", size = .2, show.legend = FALSE, na.rm = TRUE) + 
+    geom_point(aes(y = diff_big), size = .4, pch = 18) +
+    labs(x = "year", y = "Index")
+
+pdf(paste0(fig_dir, "speciesd4a_sm_cf_to23to24_130326.pdf"))
+for(jj in 1:ceiling(nspecies/9)){
+  print(pm %+%  facet_wrap_paginate( ~ group + scientific_name, ncol = 3, nrow = 3, page = jj, scales = "free_y"))
+}
+```
+
+Don't think any differences different to those described above
+Some show a swing in a different direction in the final couple of years compared to last year's version, but this is a product of the smoothing.
+
+
+### cf indicator output
+
+Read in indicator files
+```{r}
+to2024_inds <- read.csv(file = file.path(ind_data, "MSI|group+_presmooth_allspp_to2024_130326.csv")) 
+to2023_inds <- read.csv(file = file.path(last_yr, "MSI_group+_presmooth_allspp_to2023.csv"))
+```
+
+
+Stick the indicator files together and est differnce
+```{r}
+ind_cf <- to2024_inds %>% 
+  mutate(ind23 = to2023_inds$Index.M[match(paste(group, ypk, Year), 
+                                           paste(to2023_inds$group, to2023_inds$ypk, to2023_inds$Year))]) %>% 
+  mutate(diff = (Index.M - ind23)/Index.M*100) %>% 
+  mutate(diff_big = ifelse(abs(diff) > 15, 0, NA),
+         graph    = paste(group, ypk))
+```
+
+Plot Ind cf
+```{r, eval=FALSE}
+ngrps <- n_distinct(ind_cf$graph)
+#group by group
+pdf(paste0(fig_dir, "species_d4a_ind_cf_to23to24_130326.pdf"))
+for(jj in 1:ceiling(ngrps/9)){
+  pmain = ggplot(ind_cf, aes(x = Year)) +
+    geom_line(aes(y = Index.M, col = group), show.legend = FALSE) +
+    geom_line(aes(y = ind23), col = "blue", lty = 3, show.legend = FALSE) + 
+    geom_point(aes(y = diff_big), size = .5) +
+    labs(x = "year", y = "Index") + 
+    facet_wrap_paginate( ~ graph, ncol = 3, nrow = 3, page = jj)
+  print(pmain)
+}
+```
+
+
+Cf sm and unsm VP to see if smoothing looking sensible
+```{r, eval=FALSE}
+to24_smun <- to24_sm %>% 
+  mutate(unsm = to24_un$index[match(paste(species, year), paste(to24_un$species, to24_un$year))]) %>% 
+  filter(group == "vascular plants")
+  
+nspp <- n_distinct(to24_smun$species)
+#group by group
+pdf(paste0(fig_dir, "species_d4a_vp_smun_engto24.pdf"))
+for(jj in 1:ceiling(nspp/9)){
+  pmain = ggplot(to24_smun, aes(x = year)) +
+    geom_line(aes(y = index2, col = group), show.legend = FALSE) +
+    geom_line(aes(y = unsm), col = "blue", lty = 3, show.legend = FALSE) + 
+    labs(x = "year", y = "Index") + 
+    facet_wrap_paginate( ~ species, ncol = 3, nrow = 3, page = jj)
+  print(pmain)
+}
+```
+
+ 
+ 
+

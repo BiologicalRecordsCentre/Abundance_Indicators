@@ -1,0 +1,225 @@
+---
+title: "09-cf to2024 and to2023_priority"
+author: "fiona burns"
+date: "25.02.2025"
+output:
+  html_document:
+    df_print: paged
+root.dir: /data
+---
+
+This script looks at the compiled dataset of species time-series and the resulting indicators for this year's D6a publication and compares them to the equivalent datasets from last year to give a visual assessment of whether there are substantial differences barring the additional an extra year of data.
+
+Any differences found are then investigated to see if they can be traced back to the input datasets of species time-series or whether they have been introduced by the indicator pipeline. If the input data are found to differ then data providers are consulted to better understand why species time-series follow a different trajectory in the latest iteration. Any differences due to processing are investigated and rectified before re-running the pipeline and checking they plots again.
+
+libraries
+```{r lib, message=FALSE}
+library(reshape);library(plyr);library(dplyr);library(ggplot2);library(stringr);library(readxl); library(tidyr);library(ggforce)
+```
+
+
+read in tidying functions
+```{r tdy fnc}
+source("/data/notebooks/rstudio-esaiukpsi26/tidy_functions.R")#
+```
+
+input and output folders
+```{r in_out}
+#folders to write to
+fig_dir  <- "/data/notebooks/rstudio-esaiukpsi26/england/priority_d6a/figures/"
+
+#folders to write from
+ind_data <- "/data/notebooks/rstudio-esaiukpsi26/england/priority_d6a/results/"
+last_yr  <- "/data/last_yr_results"
+spp_data <- "/data/tidy_data/"
+```
+
+### cf indicator output
+
+#### read in indicator files
+
+```{r}
+to2024_inds <- read.csv(file = file.path(ind_data, "MSI|group+_presmooth_d6a_to2024_120326.csv")) 
+to2023_inds <- read.csv(file = file.path(last_yr,  "MSI_group+_presmooth_d6a_to2023_140325.csv"))
+```
+
+### stick the indicator files together and est difference
+
+```{r}
+ind_cf <- to2024_inds %>% 
+  mutate(ind23 = to2023_inds$Index.M[match(paste(group, ypk, Year), 
+                                           paste(to2023_inds$group, to2023_inds$ypk, to2023_inds$Year))]) %>% 
+  mutate(diff = (Index.M - ind23)/Index.M*100) %>% 
+  mutate(diff_big = ifelse(abs(diff) > 15, 0, NA),
+         graph    = paste(group, ypk))
+```
+
+#### plot Ind cf
+
+```{r, eval=FALSE}
+ngrps <- n_distinct(ind_cf$graph)
+#group by group
+pdf(paste0(fig_dir, "pspecies_d6a_ind_cf_to23to24_120326.pdf"))
+for(jj in 1:ceiling(ngrps/9)){
+  pmain = ggplot(ind_cf, aes(x = Year)) +
+    geom_line(aes(y = Index.M, col = group), show.legend = FALSE) +
+    geom_line(aes(y = ind23), col = "blue", lty = 3, show.legend = FALSE) + 
+    geom_point(aes(y = diff_big), size = .5) +
+    labs(x = "year", y = "Index") + 
+    facet_wrap_paginate(~ graph, ncol = 3, nrow = 3, page = jj, scales = "free_y")
+  print(pmain)
+}
+```
+
+-   Indicators now looking fairly close
+-   Fish still a little different, but I think that is the recent decline pulling things down
+-   Mammals are a little different but within the margins of year to year change as this is based on a small number of species
+
+### cf unsmoothed species time series
+
+Read in compiled data
+
+```{r}
+to24_un <- read.csv("/data/tidy_data/d6_spp_timeseries_engto24_120326.csv")
+to23_un <- read.csv(file = file.path(last_yr, "d6_spp_timeseries_engto23.csv"))
+```
+
+Rescale relative to value in first year of time-series to allow direct cf.
+
+Combine datasets and estimate difference
+
+```{r}
+to23_un <- to23_un %>% 
+  dplyr::rename(scientific_name = species) %>%
+  mutate(index = exp(index)) %>% 
+  rescale(ind_col = index, Index_root = 1) 
+
+un_cf   <- to24_un %>% 
+  dplyr::rename(scientific_name = species) %>% 
+  mutate(index = exp(index)) %>% 
+  rescale(ind_col = index, Index_root = 1) %>% 
+  mutate(index23  = to23_un$index[match(paste(scientific_name, year), 
+                                        paste(to23_un$scientific_name, to23_un$year))]) %>% 
+  mutate(diff     = (index - index23)/index * 100) %>% 
+  mutate(diff_big = ifelse(abs(diff) > 15, 0, NA)) %>% 
+  arrange(group, scientific_name) %>% 
+  mutate(scientific_name = factor(scientific_name, levels = unique(scientific_name))) %>% 
+  select(-Index_unscaled)
+
+spp_diff <- un_cf %>% 
+  filter(abs(diff) > 20) %>% 
+  group_by(scientific_name) %>% 
+  summarise(spp = unique(scientific_name),
+            grp = unique(group))
+
+#tabulate big differences - taken as over 15%, could use other thresholds 
+inst_diff_un <- un_cf %>% 
+  filter(abs(diff) > 15) %>% 
+  group_by(group) %>% 
+  summarise(ninstances = n())
+
+spp_diff_un <- un_cf %>% 
+  filter(diff > 15) %>% 
+  group_by(group) %>% 
+  summarise(spp = n_distinct(scientific_name))
+```
+
+Plot time-series per species and highlight big differences
+
+```{r plot unsm cf, eval=FALSE}
+nspecies <- n_distinct(un_cf$scientific_name)
+
+#group by group
+pdf(paste0(fig_dir, "pspeciesd6a_un_cf_to23to24_120326.pdf"), useDingbats = FALSE) 
+for(jj in 1:ceiling(nspecies/9)){
+   pmain = ggplot(un_cf, aes(x = year)) +
+    geom_line(aes(y = index, col = group), show.legend = FALSE, na.rm = TRUE) +
+    geom_point(aes(y = index, col = group), size = .2, show.legend = FALSE, na.rm = TRUE) + 
+    geom_point(aes(y = index23), col = "blue", size = .1, show.legend = FALSE, na.rm = TRUE) + 
+    geom_point(aes(y = diff_big), size = .5, pch = 18) +
+    labs(x = "year", y = "Index") + 
+    facet_wrap_paginate( ~ group + scientific_name, ncol = 3, nrow = 3, page = jj, scales = "free_y")
+  print(pmain)
+}
+```
+
+Differences to2024 updated 05.03.26
+
+-   Birds
+    -   Species Dataset source
+    -   Teal WBI WBBSBBS
+    -   Curlew WBI WBBSWBS
+
+Nearly all the birds with differences in this year's dataset compared to last years derive some of their information from the Waterways breeding bird survey (WBBS). I believe the methods for combining WBBS with other data sources has been updated. Checked with BTO and confirmed this to be the case. The current dataset is based on the updated method and there are not concerns.
+
+-   H sparrow WBI Explained by different start year, previously started in 1970, this year's time-series starts from 1976. Confirmed this is an updated analytical choice by BTO.
+
+As we have decided to use the version of the seabird timeseries from the WBI all species (anchored to operation seafarer in 1970) rather than the seabird indicator (based only on SMP and starting in 1986) the start years are mismatched for Herring gull, explaining the differences observed in the two datasets for this species
+
+-   Small differences in some of the mammals
+-   FW Inv: Nearly all are different, but this matches submitted data. Flagged with QMUL. They used an updated analytical process this year, which explains the differences observed. They removed sites with sparse data given there is now a longer time-series.
+-   VP: Lots different, but we expect this as data this year is at England level rather than UK level
+
+### cf smoothed species time-series
+
+read in smoothed data
+
+```{r}
+to24_sm <- read.csv(file = file.path(spp_data, "d6a_spp_ts_engto24_Smoothed_120326.csv"))
+to23_sm <- read.csv(file = file.path(last_yr,  "d6a_spp_ts_engto23_Smoothed.csv"))
+```
+
+rescale to allow direct cf. combine datasets and estimate difference
+
+```{r}
+to23_sm <- to23_sm %>% 
+  dplyr::rename(scientific_name = species) %>%
+  mutate(index = exp(index2)) %>% 
+  rescale(ind_col = index, Index_root = 1) 
+
+sm_cf   <- to24_sm %>% 
+  dplyr::rename(scientific_name = species) %>% 
+  mutate(index = exp(index2)) %>% 
+  rescale(ind_col = index, Index_root = 1) %>% 
+  mutate(index23  = to23_sm$index[match(paste(scientific_name, year), paste(to23_sm$scientific_name, to23_sm$year))]) %>% 
+  mutate(diff     = (index - index23)/index * 100) %>% 
+  mutate(diff_big = ifelse(abs(diff) > 15, 0, NA)) %>% 
+  arrange(group, scientific_name) %>% 
+  mutate(scientific_name = factor(scientific_name, levels = unique(scientific_name))) %>% 
+  select(-Index_unscaled)
+
+spp_diff_sm <- sm_cf %>% 
+  filter(abs(diff) > 15) %>% 
+  group_by(scientific_name) %>% 
+  summarise(spp = unique(scientific_name),
+            grp = unique(group))
+
+#tabulate big differences - taken as over 15%, could use other thresholds 
+inst <- sm_cf %>% 
+  filter(abs(diff) > 15) %>% 
+  group_by(group) %>% 
+  summarise(ninstances = n())
+
+a <- sm_cf %>% 
+  filter(diff > 15) %>% 
+  group_by(group) %>% 
+  summarise(spp = n_distinct(scientific_name))
+```
+
+plot time-series per species and highlight big differences
+
+```{r, eval=FALSE}
+nspecies <- n_distinct(sm_cf$scientific_name)
+#group by group
+pdf(paste0(fig_dir, "pspeciesd6a_sm_cf_to23to24_120326.pdf"), useDingbats = FALSE)
+for(jj in 1:ceiling(nspecies/9)){
+  pmain = ggplot(sm_cf, aes(x = year)) + 
+    geom_line(aes(y = index, col = group), show.legend = FALSE, na.rm = TRUE) +
+    geom_point(aes(y = index, col = group), size = .1, show.legend = FALSE, na.rm = TRUE) +
+    geom_point(aes(y = index23), col = "blue", size = .1, show.legend = FALSE, na.rm = TRUE) + 
+    geom_point(aes(y = diff_big), size = .4, pch = 18) +
+    labs(x = "year", y = "Index") + 
+    facet_wrap_paginate( ~ group + scientific_name, ncol = 3, nrow = 3, page = jj, scales = "free_y")
+  print(pmain)
+}
+```

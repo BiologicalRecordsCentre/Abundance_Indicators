@@ -1,0 +1,291 @@
+---
+title:  "04 - metadata_d4a_d6a_to22"
+author: "Fiona Burns"
+opened: "23.01.26"
+root.dir: "/data"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+---
+
+ - This script takes the output of '03-Filter to SI_S41' script and produces some summaries.
+ - It does not change the output files, which are further used in script '05-preSmoothing'
+
+```{r, include = FALSE, echo=FALSE}
+library(reshape);library(plyr);library(dplyr);library(ggplot2);
+library(readxl); library(DescTools);
+library(gridExtra);library(cowplot)
+```
+
+```{r}
+source("/data/notebooks/rstudio-esaiukpsi26/tidy_functions.R")
+```
+
+set up folder paths
+```{r setup}
+tidydataDir <- "/data/tidy_data" 
+figDir_d4   <- "/data/notebooks/rstudio-esaiukpsi26/england/species_d4a/figures"
+figDir_d6   <- "/data/notebooks/rstudio-esaiukpsi26/england/priority_d6a/figures"
+```
+
+read time-series
+```{r read ts}
+spp_d4a <- list(read.csv(file.path(tidydataDir,"d4_spp_timeseries_engto24_120326.csv")))
+names(spp_d4a) <- c("freeman") 
+
+spp_d6a <- list(read.csv(file.path(tidydataDir,"d6_spp_timeseries_engto24_120326.csv")))
+names(spp_d6a) <- c("freeman") 
+```
+
+
+## Metadata 
+
+### All species - D4a
+
+#### Total number of species 
+
+ - the number of species, 
+ - the number of species per group and
+ - the number of species per survey per group
+```{r meta d4}
+meta_d4   <- spp_d4a$freeman %>% 
+   summarise(nspp = n_distinct(species), 
+      min_yr = min(year[!is.na(index)])[1],  
+      max_yr = max(year[!is.na(index)])[1]) %>% 
+  mutate(group = "ALL")
+
+meta_d4_g <- spp_d4a$freeman %>% 
+     group_by( group) %>% 
+    summarise(nspp = n_distinct(species), 
+      min_yr = min(year[!is.na(index)])[1],  
+      max_yr = max(year[!is.na(index)])[1]) %>% 
+    ungroup() %>% 
+  full_join(meta_d4)
+
+meta_d41 <- spp_d4a$freeman %>% 
+     group_by(survey, group) %>% 
+     summarise(nspp = n_distinct(species), 
+      min_yr = min(year[!is.na(index)])[1], 
+      max_yr = max(year[!is.na(index)])[1]) %>% 
+    ungroup() %>% 
+    full_join(meta_d4_g) %>% 
+    arrange(group, desc(nspp)) %>% 
+    select(group, survey, nspp, min_yr, max_yr ) %>% 
+    mutate(survey = ifelse(is.na(survey), "TOTAL", as.character(survey)))
+meta_d41
+```
+
+```{r, eval=FALSE}
+write.csv(meta_d41, 
+          file = file.path(tidydataDir, "metadata_d4engto24_120326.csv"), row.names = FALSE)
+```
+
+
+#### Number of species per year
+
+Let's look at the number and proportion of species with values in the dataset in each year
+
+ - summarise across all species
+ - summarise by taxonomic group
+ - add in total number of species from meta... file above
+ - express all in relation to the total species
+ 
+```{r spp yr d4}
+sppyr_d4a <- spp_d4a$freeman %>% 
+  group_by(year) %>% 
+  summarise(spp_yr = n_distinct(species[!is.na(index)]) ) %>% 
+  mutate(group = "ALL") 
+sppyr_grp_d4a <- spp_d4a$freeman %>% 
+  group_by(year, group) %>% 
+  summarise(spp_yr = n_distinct(species[!is.na(index)])) %>% 
+  full_join(sppyr_d4a) %>% 
+  mutate(total_spp = 
+           meta_d4_g$nspp[match(group, meta_d4_g$group)]) %>% 
+  mutate(pspp = spp_yr/total_spp * 100)
+```
+
+```{r, eval=FALSE}
+write.csv(sppyr_grp_d4a, file = file.path(tidydataDir, "spp_in_engd4ato24_peryr_120326.csv"))
+```
+
+plot
+```{r}
+p <- ggplot(sppyr_grp_d4a, aes(year, spp_yr)) +
+  geom_col()+
+  facet_wrap(vars(group), scales = "free_y")+
+  ylab("Number of species")
+p
+```
+
+```{r, eval=FALSE}
+jpeg(file = file.path(figDir_d4, "d4_engto24_spp_in_ind_grp.jpeg"),
+     width = 7, height = 5, units = "in", res = 500)
+
+print(p)
+dev.off()
+```
+
+### Priority species - D6a
+
+#### Total number of species 
+
+- the number of species, 
+- the number of species per group and
+- the number of species per survey per group
+```{r d6 meta}
+meta_d6   <- spp_d6a$freeman %>% 
+   dplyr::summarise(nspp = n_distinct(species), 
+      min_yr = min(year[!is.na(index)])[1],  
+      max_yr = max(year[!is.na(index)])[1]) %>% 
+  mutate(group = "ALL")
+
+meta_d6_g <- spp_d6a$freeman %>% 
+     group_by(group) %>% 
+    dplyr::summarise(nspp = n_distinct(species),  
+      min_yr = min(year[!is.na(index)])[1], 
+      max_yr = max(year[!is.na(index)])[1]) %>% 
+    ungroup() %>% 
+  full_join(meta_d6)
+
+meta_d61 <- spp_d6a$freeman %>% 
+     group_by(survey, group) %>% 
+    dplyr::summarise(nspp = n_distinct(species), 
+      min_yr = min(year[!is.na(index)])[1], 
+      max_yr = max(year[!is.na(index)])[1]) %>% 
+    ungroup() %>% 
+    full_join(meta_d6_g) %>% 
+    arrange(group, desc(nspp)) %>% 
+    select(group, survey, nspp, min_yr, max_yr ) %>% 
+    mutate(survey = ifelse(is.na(survey), "TOTAL", as.character(survey)))
+meta_d61
+```
+
+```{r, eval=FALSE}
+write.csv(meta_d61,    file = file.path(tidydataDir, "metadata_d6engto24_120326.csv"), row.names = FALSE)
+```
+
+#### Number of species per year
+
+Let's look at the number and proportion of species with values in the dataset in each year
+
+ - summarise across all species
+ - summarise by taxonomic group
+ - add in total number of species from meta... file above
+ - express all in relation to the total species
+```{r spp yr d6}
+sppyr_d6a <- spp_d6a$freeman %>% 
+  group_by(year) %>% 
+  dplyr::summarise(spp_yr = n_distinct(species[!is.na(index)]) ) %>% 
+  mutate(group = "ALL") 
+sppyr_grp_d6a <- spp_d6a$freeman %>% 
+  group_by(year, group) %>% 
+  dplyr::summarise(spp_yr = n_distinct(species[!is.na(index)])) %>% 
+  full_join(sppyr_d6a) %>% 
+  mutate(total_spp = 
+           meta_d6_g$nspp[match(group, meta_d6_g$group)]) %>% 
+  mutate(pspp = spp_yr/total_spp * 100)
+```
+
+save  
+```{r,eval=FALSE}
+write.csv(sppyr_grp_d6a, file = file.path(tidydataDir, "spp_in_engd6ato24_peryr_120326.csv"))
+```
+
+plot
+```{r}
+p <- ggplot(sppyr_grp_d6a, aes(year, spp_yr)) +
+  geom_col()+
+  facet_wrap(vars(group), scales = "free_y")+ 
+  ylab("Number of species")
+p
+```
+
+```{r eval=FALSE}
+jpeg(7, 5, units = "in", file  = file.path(figDir_d6, "d6_engto24_spp_in_ind_grp.jpeg"), res = 500)
+print(p)
+dev.off()
+```
+
+## Extreme values 
+
+Let's look at the number of extreme values 
+
+ - save info on how often species time-series go below at 0.01 or above 100  
+ - in order to do this we first rescale the time-series to start at 1 in their first year
+ - we don't need to rescale to use the freeman method, this is just to assess extreme values and is not saved into the data used to run the indicator models on
+
+function to count the number of extreme values
+```{r num cap fun}
+no_cap <- function(data) {
+  a_b <-  dplyr::summarise(data, 
+                    above100 = sum(index_m > 100, na.rm = TRUE),
+                    below0.01 = sum(index_m < 0.01, na.rm = TRUE))
+return(a_b)
+} 
+```
+
+##### Function now in 'tidying_functions.R'
+
+- function to rescale species' time-series relative to the value in the first year [rescale]
+
+Estimate the number of rapidly increasing or decreasing species
+```{r num extremes}
+ext_trd_d4a  <- spp_d4a$freeman %>% 
+    rename(scientific_name = species) %>% 
+    rescale(ind_col = index_m, Index_root = 1) %>% 
+    group_by(group, scientific_name, common_name) %>% 
+    no_cap() %>% 
+    filter(!(above100 == 0 & below0.01 ==0))
+
+ext_trd_d6a <- spp_d6a$freeman %>% 
+  rename(scientific_name = species) %>% 
+    rescale(ind_col = index_m, Index_root = 1) %>%
+    group_by(group, scientific_name, common_name) %>% 
+    no_cap() %>% 
+    filter(!(above100 == 0 & below0.01 ==0))
+```
+
+```{r, eval=FALSE}
+write.csv(ext_trd_d4a, 
+          file = file.path(tidydataDir, "d4a_engto24_spp_a100_b0.001_120326.csv"), 
+          row.names = FALSE)
+
+write.csv(ext_trd_d6a, 
+          file = file.path(tidydataDir, "d6a_engto24_spp_a100_b0.001_120326.csv"), 
+          row.names = FALSE)
+```
+
+## Number of zeros or psuedo-zeroes
+
+Zeros are difficult to deal with in indicator models and we use a rule of thumb workaround to address this. Good to assess:
+
+- the number of species affected 
+- the number of instances 
+
+```{r num zeros}
+zrs_d4 <- spp_d4a$freeman %>% 
+  group_by(survey, species, common_name) %>% 
+  summarise(zero_psuedozero = sum(index_orig == 0, na.rm = TRUE)) %>% 
+  filter(zero_psuedozero != 0) 
+
+zrs_d6 <- spp_d6a$freeman %>% 
+  dplyr::group_by(survey, species, common_name) %>% 
+  dplyr::summarise(zero_psuedozero = sum(index_orig == 0, na.rm = TRUE)) %>% 
+  filter(zero_psuedozero != 0)
+```
+
+```{r, eval=FALSE}
+write.csv(zrs_d4, 
+          file.path(tidydataDir, "d4_engto24_zero_psuedozeros_inspptrends_120326.csv"), 
+          row.names = FALSE)
+
+write.csv(zrs_d6, 
+          file.path(tidydataDir, "d6_engto24_zero_psuedozeros_inspptrends_120326.csv"), 
+          row.names = FALSE)
+```
+
+
+

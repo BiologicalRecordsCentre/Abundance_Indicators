@@ -1,0 +1,593 @@
+---
+title: "Pre-soothing species trends - priority"
+author: "Nick Isaac"
+date: "2024-02-28"
+root.dir: "/data"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+In this document we smooth the species trends for the England priority species abundance index. The input data is the complete set of index values (one per species per year) that has been prepared in early 2026. For most species the species abundance time-series run to 2024.
+
+In that dataset, trends for all species are unsmoothed, with the exception of the bats. However, for several datasets there are both smoothed and unsmoothed variants.
+
+```{r setup, include=FALSE}
+library(fields)
+library(reshape2)
+library(dplyr)
+library(ggplot2)
+
+datadir <- "/data/tidy_data"
+```
+
+# Load and prepare data
+
+Load the raw data and examine.
+
+```{r}
+nrow(data <- read.csv(file.path(datadir, "d6_spp_timeseries_engto24_120326.csv"))) 
+
+# check for NAs
+table(is.na(data$index))
+
+#remove the NAs
+nrow(data <- subset(data, !is.na(index)))
+
+# check number of species
+length(unique(data$species))
+```
+
+Let's remind ourselves of the taxonomic coverage
+
+```{r}
+oneRowPerSpecies <- unique(data[,c("species","group","survey")])
+table(oneRowPerSpecies$group)
+table(oneRowPerSpecies$survey)
+```
+
+Let's look at which datasets come already pre-smoothed
+
+```{r}
+(smoothedAlready <- table(data$survey, !is.na(data$index_sm)))
+```
+
+we need a list of those species that are already smoothed
+
+```{r}
+SmoothedAlreadySp <- unique(subset(data, !is.na(data$index_sm))$species)
+```
+
+BBS, BBS_m, NDMP (Dormouse), Wild Bird Indicators and WWBI all have an index_sm value. Let's plot them
+
+```{r}
+ggplot(data=subset(data, species %in% SmoothedAlreadySp), aes(x=index, y=index_sm, col=species)) + 
+  geom_point() + geom_line() +
+  scale_y_log10() +
+  theme(legend.position = "none") +
+  facet_wrap(~survey, scales="free") 
+```
+
+So, for species in these groups
+
+```{r}
+smoothedAlready[,2] > 0
+```
+
+We know that bats have also been smoothed. But in this case, only the smoothed index has been provided (whereas for others we've used the unsmoothed index but kept a copy of the smoothed index.
+
+```{r summarise}
+as.data.frame(data %>% 
+                group_by(survey) %>% 
+                summarise(n=length(index),
+                          min=round(min(index, na.rm=T),1),
+                          median= round(median(index, na.rm=T),1),
+                          max=round(max(index, na.rm=T),1)
+))
+```
+
+For the Breeding Bird Survey, smoothing is done on the abundance scale. The `index` column in this dataset is on the natural log scale, as required for the Freeman method. So let's first create an explicit column of data with the exponentatied index:
+
+```{r expIndex}
+data$expIndex <- exp(data$index)
+```
+
+# Smoothing
+
+Now do the smoothing. we fit a thin plate spline to each species' trend. I've included a couple of catches for species with few data. The number of degrees of freedom is set to either the span of the time-series \* 0.3, or one fewer than the number of observations, whichever is the smaller number. If the degrees of freedom from this calculation is 1 then the model is not run.
+
+```{r, Smoother}
+SmoothIndexDat <- function(name, logScale = FALSE, minDF = 1){
+    #print(name)
+    sub.set <- subset(data, species == name)
+    yRange  <- range(sub.set$year)
+    ySpan   <- 1+diff(range(yRange))
+    nYObs   <- nrow(sub.set)
+    yFill   <- nrow(sub.set)/ySpan
+
+    # Set degrees of freedom
+    dfs <- min(round(ySpan*0.3), nrow(sub.set)-1) # for species with big gaps
+    
+    out <- list(spName = name,
+               ySpan = ySpan,
+               nYObs = nYObs,
+               yFill = yFill,
+               df = dfs)
+    
+   if(dfs > minDF) {
+      if(logScale == F) {
+        response <- sub.set$expIndex
+      } else {
+        response <- sub.set$index
+      }
+      modsm <- try(suppressWarnings(fields::Tps(sub.set$year, response, df=dfs, method = "REML")))
+    } else 
+      modsm <- NULL
+    
+    if("try-error" %in% class(modsm))
+      out$status <- "error"
+    else if(dfs <= minDF)
+      out$status <- "fewDF"
+    else if(any(modsm$warningTable$Warning==TRUE))
+      out$status <- "warning"
+    else
+      out$status <- "ok"
+
+    if(out$status %in% c("warning", "ok")){
+      out$result <- data.frame(year = sub.set$year,
+                               smFitted  = predict(modsm, x=sub.set$year))
+    } else out$result <- NULL
+    return(out)
+}
+```
+
+
+We don't need to smooth on the measurement scale as agreed to smooth on log scale
+
+Smooth on Log scale
+```{r log_sm, results='hide'}
+system.time({
+  outDataL <- lapply(unique(data$species), 
+                     SmoothIndexDat, logScale = TRUE, minDF=1)
+})
+```
+
+Extract the smoothed trends to a dataframe
+```{r extract_sm}
+smIndexL <- lapply(outDataL, function(x) {
+  if(!is.null(x$result)) return(cbind(species=x$spName, x$result))
+  })
+nrow(smIndexL <- dplyr::bind_rows(smIndexL))
+```
+
+Extract the metadata
+```{r extract_meta}
+mdL <- lapply(outDataL, function(x){
+  data.frame(x[!names(x) %in% "result"])
+})
+mdL <- do.call(rbind, mdL)
+
+with(mdL, table(status))
+```
+
+Ok, we have one species for which there is only 1 or 2 DF so we don't fit the model (it would just join the dots), and \ 39 species with a warning.  
+
+Add the taxon and dataset information.
+
+```{r}
+mD <- merge(mdL, unique(data[,c("species","group","survey")]), by.x = "spName", by.y = "species")
+```
+
+Merge with data
+```{r}
+nrow(smDat <- merge(smIndexL, #smDat
+                    data[c("species","year","group", "survey", "index", "index_sm", "expIndex")],
+                    all=TRUE, by = c("species", "year")))
+
+smDat <- merge(smDat, mD[,c("spName","status")], by.x="species", by.y="spName") 
+```
+
+## Explore NaN
+
+How many NaNs? None
+
+```{r}
+with(smDat, table(is.nan(smFitted))) 
+```
+
+# Investigate errors and warnings
+
+Species fall into four categories. The majority are "ok", which means that the Thin Plate Spline worked well. There are a reasonable number that returned a warning and one error. There's one other that would have thrown an error (they have few DF). Let's take a look at these groups in turn.
+
+```{r plotErrors, fig.height = 4}
+length(ErrorSp <- subset(mD, status %in% c("error", "fewDF"))$spName) 
+
+ggplot(data = subset(smDat, species %in% ErrorSp), aes(x=year, y=index)) +
+  geom_line(aes(col=species)) +
+  geom_point(aes(col=species)) +
+  scale_y_log10() +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+Clearly these are species with insufficient data to do the smoothing.
+
+## Investigate Warnings
+
+Now let's look at the species with warnings. Which groups are they in?
+
+```{r}
+warningSp <- unique(subset(mD, status == "warning")$spName) 
+table(subset(mD, status == "warning")$group) 
+```
+
+Ok, that's nearly all the mammals, 1/3 of the moths and butterflies, and just a minority of birds.
+
+Is it something to do with incomplete time series?
+
+```{r}
+temp <- subset(mD, status == "warning")$yFill
+table(temp==1)
+```
+
+Most of them are complete.
+
+```{r}
+hist(temp[temp<1], xlab="proportion of years with data")
+```
+
+Most of the incomplete trends are almost complete (perhaps one year missing). Two species' are very incomplete.
+
+# Plot smoothed trends
+
+## Sparse time-series
+
+First, look at the species whose series contain lots of missing values
+
+```{r plotshort, echo=FALSE, fig.height = 4}
+missingWarnSp <- subset(mD, yFill <= 0.5 & status %in% c("ok", "warning"))$spName
+
+temp <- subset(smDat, species %in% missingWarnSp)
+ 
+# plot
+ggplot(data=temp, aes(x=year)) +
+  geom_point(aes(y =index,    col=species)) +
+  geom_line(aes(y  =smFitted, col=species)) +
+  theme_bw() +
+  scale_y_log10() +
+  facet_wrap(~status, nrow=1, scales = "free")
+```
+
+There's not a whole lot to see here. The smoothed trends look ok, but not really different from the unsmoothed.
+
+```{r}
+subset(mD, spName %in% missingWarnSp, select = c(1,2,3,5,6,8))
+```
+
+In summary, the incomplete time series are all in the SCARRABS data, and there doesn't seem to be a big issue associated with such data.
+
+## Plants
+
+The plants have a short time-series: only ten years. I thought that smoothing wouldn't make a lot of sense. In fact, but there are some plants that fluctuate a lot, giving the appearance of big changes from the baseline.
+
+```{r plotPlants, echo=FALSE}
+nrow(temp <- subset(smDat, group=="vascular plants" & status == "warning"))
+
+# plot
+ggplot(data=temp, aes(x=year)) +
+  geom_point(aes(y=index, col=species)) +
+  geom_line(aes(y=smFitted, col=species)) +
+  theme_bw() +
+  theme(legend.position = "none")
+```
+
+## Mammals
+
+For the mammals, my hunch is that the species with warnings are the bats, since these are a shorter time series than other groups
+
+```{r}
+table(subset(mD, status == "warning" & group =="mammals")$survey)
+```
+
+All are already smoothed. So let's ignore these.
+
+## Fish
+
+```{r plotFish1, echo=FALSE}
+temp <- subset(smDat, group=="fish" & species %in% warningSp)
+
+# plot
+ggplot(data=temp, aes(x=year)) +
+  geom_point(aes(y=index,    col=species)) +
+  geom_line(aes( y=smFitted, col=species)) +
+  theme_bw() +
+  theme(legend.position = "none") 
+```
+
+These are the fish with warnings. Some are quite noisy and the smoothing does look like it could be helpful.
+
+```{r plotFish2, echo=FALSE}
+temp <- subset(smDat, group=="fish" & !species %in% warningSp)
+
+# group the species
+temp$spnum <- as.numeric(as.factor(temp$species))
+nGrp <- 3
+temp$Group <- paste("good Fish: Group", 1 + (temp$spnum %% nGrp))
+
+# plot
+ggplot(data=temp, aes(x=year)) +
+  geom_point(aes(y=index, col=species)) +
+  geom_line(aes(y=smFitted, col=species)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  facet_wrap(~Group, nrow=1, scales = "free")
+```
+
+In general these seem a bit tighter (i.e. less noisy)
+
+## Freshwater invertebrates
+
+```{r Inverts1, echo=FALSE}
+temp <- subset(smDat, group=="fw invertebrates" & species %in% warningSp)
+# plot
+ggplot(data=temp, aes(x=year)) +
+  geom_point(aes(y=index, col=species)) +
+  geom_line(aes(y=smFitted, col=species)) +
+  theme_bw() +
+  theme(legend.position = "none") 
+```
+
+
+## Butterflies
+
+Now the butterflies with warnings. 
+
+```{r Butts1, echo=FALSE, fig.width=12}
+temp <- subset(smDat, group=="butterflies" & species %in% warningSp) #4 species
+
+# plot
+ggplot(data=temp, aes(x=year, col=species)) +
+  geom_point(aes(y=index)) +
+  geom_line(aes(y=smFitted)) +
+  theme_bw() +
+  theme(legend.position = "none") 
+```
+
+Here is a case where smoothing really does like is will help. All these trends are rather noisy.
+
+Now plot those without warnings:
+
+```{r Butts2, echo=FALSE, fig.width=12}
+temp <- subset(smDat, group=="butterflies" & !species %in% warningSp)
+
+# group the species
+temp$spnum <- as.numeric(as.factor(temp$species))
+nGrp <- 4
+temp$Group <- paste("good Butterflies: Group", 1 + (temp$spnum %% nGrp))
+
+# plot
+ggplot(data=temp, aes(x=year, col=species)) +
+  geom_point(aes(y=index)) +
+  geom_line(aes(y=smFitted)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  facet_wrap(~Group, nrow=2, scales = "free")
+```
+
+In general these are less noisy than the ones that returned errors.
+
+## Moths
+
+For the moths, it would be helpful to understand the difference between the BC Priority species and the more widespread RIS species.
+
+```{r}
+table(subset(mD, status == "warning" & group =="moths")$survey)
+```
+
+Let's plot all the BC priority moths toghether
+
+```{r BCMoth, echo=FALSE, fig.height=4}
+temp <- subset(smDat, survey=="prior_m")
+
+# plot
+ggplot(data=temp, aes(x=year)) +
+  geom_point(aes(y=index, col=species)) +
+  geom_line(aes(y=smFitted, col=species)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  facet_wrap(~status, nrow=1, scales = "free")
+```
+
+No really obvious difference, although again the variance seems higher on the species with warnings.
+
+```{r RIS1, echo=FALSE, fig.width=12}
+temp <- subset(smDat, survey=="ris" & status == "warning")
+
+# group the species
+temp$spnum <- as.numeric(as.factor(temp$species))
+nGrp <- 4
+temp$Group <- paste("Warning Moths: Group", 1 + (temp$spnum %% nGrp))
+
+# plot
+ggplot(data=temp, aes(x=year, col=species)) +
+  geom_point(aes(y=index)) +
+  geom_line(aes(y=smFitted)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  facet_wrap(~Group, ncol= 2, scales = "free")
+```
+
+Nothing especially alarming here, except for some noticeable behaviour where zeros have been controlled for.
+
+```{r RIS2, echo=FALSE, fig.width=12}
+temp <- subset(smDat, survey=="ris" & status == "ok")
+
+# group the species
+temp$spnum <- as.numeric(as.factor(temp$species))
+nGrp <- 10
+temp$Group <- paste("good Moths: Group", 1 + (temp$spnum %% nGrp))
+
+# plot
+ggplot(data=temp, aes(x=year, col=species)) +
+  geom_point(aes(y=index), size= 0.4) +
+  geom_line(aes(y=smFitted)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  facet_wrap(~Group, nrow = 5, scales = "free")
+```
+
+## Birds
+```{r bird1, echo=FALSE, fig.width=12}
+temp <- subset(smDat, group == "birds" & status == "warning")
+
+# group the species
+temp$spnum <- as.numeric(as.factor(temp$species))
+nGrp <- 2
+temp$Group <- paste("Warning Birds: Group", 1 + (temp$spnum %% nGrp))
+
+# plot
+ggplot(data=temp, aes(x=year, col=species)) +
+  geom_point(aes(y=index)) +
+  geom_line(aes(y=smFitted)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  facet_wrap(~Group, ncol= 1, scales = "free")
+```
+
+```{r birds2, echo=FALSE, fig.width=12}
+temp <- subset(smDat, group == "birds" & status == "ok")
+
+# group the species
+temp$spnum <- as.numeric(as.factor(temp$species))
+nGrp <- 8
+temp$Group <- paste("good Birds: Group", 1 + (temp$spnum %% nGrp))
+
+# plot
+ggplot(data=temp, aes(x=year, col=species)) +
+  geom_point(aes(y=index), size= 0.4) +
+  geom_line(aes(y=smFitted)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  facet_wrap(~Group, nrow = 4, scales = "free")
+```
+
+
+## Conclusion
+
+We have checked the warning messages and are happy to proceed with the smoothed time-series as they don't appear to be concerning 
+
+Potential development option: It would be worth revisiting the pseudozeros again. The value we choose may be having an impact. We could also consider trialling using a different number of degrees of freedom.
+
+
+# Compare smoothed with unsmoothed trends
+
+Here we use the data that are smoothed on the log scale
+
+```{r}
+temp <- subset(smDat, !is.na(smFitted)) 
+spCorr <- lapply(unique(temp$species), function(sp){
+  sub.set <- subset(temp, sp==species)
+  P <- with(sub.set, cor.test(smFitted, index)$estimate) 
+  return(data.frame(species=sp, P=P))
+})
+spCorr <- dplyr::bind_rows(spCorr)
+spCorr <- merge(spCorr, oneRowPerSpecies)
+
+spCorr %>% group_by(survey) %>%
+  summarise(
+    nSp = length(P),
+    q1 = quantile(P, 0.25, na.rm=T),
+    q2 = median(P, na.rm=T),
+    q3 = quantile(P, 0.75, na.rm = T))
+```
+
+# Prepare a single dataset for export
+
+Let's just check the input and output dataframes have the same number of observations:
+
+```{r}
+nrow(data) == nrow(smDat)
+```
+
+Check whether there are missing values
+
+```{r}
+summary(smDat)
+```
+
+Yes. These will be for the species in the "error" and "fewDF" categories. Let's fix these.
+
+what we'll do is rename the old `index` column as `temp` (noting that `index_orig` is a column name in the original dataframe). 
+
+```{r}
+outDat        <- smDat
+outDat$temp   <- outDat$index
+outDat$index2 <- outDat$smFitted 
+  
+# fix NA: these are the species with few degrees of freedom, or that returned errors
+# not the negative values when smoothing on the measurement scale - we fixed those earlier
+i <- which(is.na(outDat$index2))
+outDat$index2[i] <- outDat$temp[i] 
+outDat$status[i] <- "unsmoothed"
+
+
+#############   need to run this code block with and without these lines      ###############
+#############   first to save with the smoothed vplants, then the unsmoothed  ###############
+
+# now replace the Plants with the original index, because it's not clear that smoothing helps here
+i <- which(outDat$survey == "npms")
+outDat$index2[i] <- outDat$temp[i] 
+outDat$status[i] <- "unsmoothed"
+
+#############  end section to repeat  ######################################################
+
+
+
+# now replace the Bats with the original index, because these were already smoothed.
+i <- which(outDat$survey == "nbmp")
+outDat$index2[i] <- outDat$temp[i]  
+outDat$status[i] <- "SmoothedAlready"
+
+i <- which(!is.na(smDat$index_sm))
+outDat$index2[i] <- log(outDat$index_sm[i])
+outDat$status[i] <- "SmoothedAlready"
+
+any(is.na(outDat$index2)) 
+table(outDat$status)
+```
+
+Summarise by taxonomic group
+
+```{r}
+dcast(unique(outDat[,c("species", "group", "survey","status")]),
+      formula = group + survey ~ status)
+```
+
+Having checked the file, we can write it out.
+
+```{r,eval=FALSE}
+write.csv(outDat[,c("species","year","group","survey", "index2","status")], 
+          file = file.path(datadir, "d6a_spp_ts_engto24_Smoothed_120326.csv"), row.names = FALSE)
+```
+
+once have re-run from code block at 610 replacing the smoothed VP time-series
+```{r, eval=FALSE}
+write.csv(outDat[,c("species","year","group","survey", "index2","status")], 
+          file = file.path(datadir, "d6a_spp_ts_engto24_Smoothed_unsmVP_120326.csv"), row.names = FALSE)
+```
+
+# Summary
+
+We have smoothed the species trends on the log scale. We have checked the warnings and found there is no real problem here. However, we may wish to revisit the number of degrees of freedom. 
+
+We have used the smoothed trends except for: 
+
+1) Bats and other species for which smoothed trends are available 
+2) for species with only 2-3 years of data 

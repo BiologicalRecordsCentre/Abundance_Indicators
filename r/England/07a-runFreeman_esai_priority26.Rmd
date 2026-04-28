@@ -1,0 +1,231 @@
+---
+title: "Run Freeman By Group - D6a - to2024"
+author: "Nick Isaac"
+date: "2024-02-28"
+output: html_document
+---
+
+We're going to run the Freeman method for multiple groups with differing levels of smoothing for the priority species indicator D6a.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(BRCindicators)
+library(jagsUI)
+library(ggplot2)
+library(reshape2)
+library(dplyr)
+library(tidyr)
+```
+
+### Load in the data. 
+```{r readData}
+datadir <- "/data/tidy_data"
+data    <- read.csv(file = file.path(datadir,"d6a_spp_ts_engto24_Smoothed_unsmVP_120326.csv")) 
+
+n_distinct(data$species) #161 species
+```
+
+This dataset contains smoothed the species trends. We have checked the warnings and found there is no real problem here. However, we may wish to revisit the number of degrees of freedom. We have used the smoothed trends except for:
+
+1) where the data were provided with a smoothed option we have used this is priority over the smoothing done in script 05a
+2) for plants with short time-series
+3) where the smoother failed (one species with only three data points)
+
+Now we setup the runs. We are going to run each group and the full set four times each.
+
+We originally trialled whether to use smoothing on the log scale (`index2`) or on the measurement scale (`index1`).
+
+We have decided to use the log smoothing, and so for D6a haven't generated smoothed values on the measurement scale, so only 'index2' is available here
+```{r}
+data$index <- data$index2
+```
+
+We need to add a small fudge factor to the fish data, because there is no fish data for 2020. If we don't do this, the model will incorrectly believe that 2022 is actually 2021. Need to use a different fish species from the all species indicator as Sprat not on the S41 list
+```{r}
+data <- rbind(data[,c("species", "year", "group", "index")], 
+              data.frame(species = "anguilla anguilla", 
+                               year = 2020,
+                               group = "fish",
+                               index = NA))
+```
+
+### Define a function to run the model for a particular set of data
+
+We need to add a 'd6a' section to the output file titles, included as 'priority' in function
+```{r runFreeman, echo=TRUE}
+runFreeman <- function(gr, ypk, save = TRUE, runShort = TRUE, nit=5000, spTrends = FALSE, priority = NULL){
+                       
+                       if(gr == "all") {
+                         inddat <- data[,c("species","year", "index")]
+                       } else {
+                         inddat <- subset(data, group==gr, select = c("species","year", "index"))
+                       }
+
+                       n.yr <- length(unique(inddat$year))
+                       n.knots <- round(n.yr / ypk)
+                       print(paste0(gr, ": ", ypk, " years per knot. With ",n.yr, " years of data = ", n.knots," knots overall"))
+
+                       if(runShort & n.knots ==1) {
+                         n.knots <- 2
+                         print("running with two knots")
+                       }
+                       
+                       if(n.knots > 1){
+                   
+                         mod <- bma(data = inddat, 
+                                 num.knots = n.knots,
+                                 parallel = TRUE,
+                                 plot = FALSE,
+                                 n.iter = nit,
+                                 save.sppars = spTrends)
+                       
+                         md <- data.frame(group = gr,
+                                  ypk = ypk,
+                                  n.knots = n.knots,
+                                  n.it = nit)
+                         attr(mod, "metadata") <- md
+
+                        if(save){
+                         letter   <- "L"
+                         saveRDS(mod, file=paste0("priority_d6a/results/", gr, "_", 
+                                                  ypk,"ypk_",letter,"_",
+                                                  priority, "_",
+                                                  nit/1000,"kit_",
+                                                  format(Sys.Date(),"%y%m%d"),".rds"))
+                         return(NULL)
+                       } else {
+                         return(mod)
+                       }
+                       } else {
+                         print("only one knot: skipping")
+                       }
+                       
+}
+```
+
+Define some simple parameters for the model runs.
+```{r setPars}
+taxa <- unique(data$group)
+# set the number of years per knot
+ypk <- c(10, 3) 
+```
+
+## Full time period
+
+### Group level indicators
+
+Don't run for groups with only a few species, fw (2), vp (2) and bumbles (1)
+So run for birds, bfly, fish, mammals and moths
+```{r, eval = FALSE}
+p <- expand.grid(ypk = ypk, gr = setdiff(taxa, c("vascular plants", "fw invertebrates","bumblebees")))
+system.time({
+    output_group <- mapply(ypk = p$ypk, gr = p$gr, runFreeman, SIMPLIFY = FALSE, save = TRUE, priority = "d6")
+})
+```
+
+Runtime varies with number of species and length of time-series:
+14 mins for lot 
+
+Potential development options:
+
+- Due to the nature of the model we will always get marginally different results when rerunning with the same input data 
+- However, it would be useful to consider increasing iterations to see if the impact of stochasticity is reduced
+- Two runs using 10k iterations for birds and butterflies gave M values that tended to differ at the first decimal place, for butterflies the uci sometimes differed by more than one percent.
+- Keep with 5k iterations for now, but return to this as part of development work.
+
+### all species
+
+Now the all the species MSI. For this we want to save the species trends.
+```{r, eval = FALSE}
+system.time({
+    output_group <- sapply(ypk, runFreeman, gr = "all", save = TRUE, spTrends = TRUE, priority = "d6")
+})
+```
+17 mins
+
+
+### one year per knot
+
+Rerun each group and overall with one knot for every year of data.
+Don't run for bumbles, vp and fw inv
+```{r, eval = FALSE}
+system.time({
+    output_group <- sapply(c(setdiff(taxa, c("vascular plants", "fw invertebrates","bumblebees")), "all"),
+                           runFreeman, ypk = 1, save = TRUE, spTrends = FALSE, priority = "d6")
+})
+```
+32 mins
+
+
+### All-species version 2
+
+Exclude the new groups as a direct cf to 2023. Give this a '4grp' suffix
+For this we want to save the species trends.
+```{r}
+data <- data %>% 
+  filter(!(group == "vascular plants"|
+           group == "fw invertebrates"|
+           group == "bumblebees"|
+           group == "fish"))
+```
+
+```{r, eval = FALSE}
+system.time({
+    output_group <- sapply(ypk, runFreeman, gr = "all", 
+                           save = TRUE, spTrends = TRUE, priority = "d6_4grp")
+})
+```
+~17 mins
+
+## Short term assessments
+
+### Ten year assessment
+
+- Re-run all species for last ten years with curtailed dataset [ten growth rate estimates, 11 years]
+- Using 3ypk
+- What about species with less than ten years span of data?
+- Keep in for now, but say which these are
+```{r}
+data <- data %>% 
+  filter(year > 2013)
+
+sparse <- data %>% 
+  group_by(species) %>% 
+  summarise(yrs = max(year)-min(year)) %>% 
+  filter(yrs < 10)
+sparse %>% arrange(yrs)
+```
+22 with a span of less than ten years, mostly nine, one species only covers four year - Eustroma reticulatum
+
+```{r, eval = FALSE}
+system.time({
+    output_group <- runFreeman(gr = "all", 
+                           save = TRUE, ypk = 3, spTrends = TRUE, priority = "d6_ten_yr")
+})
+```
+
+### Five year assessment
+
+- Re-run all species for last five years with curtailed dataset [five growth rate estimates, 11 years]
+- Using 3ypk
+```{r}
+data <- data %>% 
+  filter(year > 2018)
+
+sparse_five <- data %>% 
+  group_by(species) %>% 
+  summarise(yrs = max(year)-min(year)) %>% 
+  filter(yrs < 5)
+sparse_five %>% arrange(yrs)
+```
+- Need to remove Hen harrier
+- Athetis pallustris, two years only
+
+
+```{r, eval = FALSE}
+system.time({
+    output_group <- runFreeman(gr = "all", 
+                           save = TRUE,ypk = 3 ,  spTrends = TRUE, priority = "d6_five_yr")
+})
+```

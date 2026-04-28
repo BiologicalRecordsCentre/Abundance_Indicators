@@ -1,0 +1,733 @@
+---
+title: "Explore English abundance index to2024"
+author: "Nick Isaac"
+date: "2024-03-22"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+We have run the Freeman method for multiple groups, with differing
+levels of smoothing, on a dataset of pre-smoothed index values (on the
+log scale).
+
+The underlying dataset contains 1185 taxa (mostly species), i.e. \>99%
+of those listed on Schedule 2 of the Biodiversity Regulations. The 10
+missing species are: - 1 plant and nine species whose model outputs
+failed the automatic checks (eight moths and one fish)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(coda)
+library(ggplot2)
+library(reshape2)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(scales)
+library(devtools)
+install_github('biologicalrecordscentre/BRCindicators')
+library(BRCindicators)
+```
+
+```{r}
+memory.limit(size = 12000)
+```
+
+# Read in the model files
+
+```{r readData, include = FALSE}
+modeldir <- "/data/notebooks/rstudio-esaiukpsi26/england/species_d4a/results" 
+qa_dir   <- "/data/notebooks/rstudio-esaiukpsi26/england/species_d4a/results/qa"
+```
+
+## Get the models
+
+```{r setPars}
+modelfiles <- list.files(modeldir, recursive = TRUE, patt = ".rds")
+modelfiles <- modelfiles[(grepl("0313", modelfiles)==TRUE)] #select final run
+modelfiles
+```
+
+```{r readModels}
+output <- lapply(modelfiles, function(modfilename){
+ readRDS(file.path(modeldir, modfilename)) 
+})
+```
+
+## Get the metadata
+
+Extract the metadata from all the model runs into a dataframe
+
+```{r meta}
+pars <- lapply(output, function(mod){
+  md <- attr(mod, "metadata")
+})
+pars <- do.call(rbind, pars)
+
+names(output) <- modelfiles #five_yr is model 4 and ten year is model 5, need to differentiate from all species models for full time period
+
+pars <- pars %>% 
+  mutate(group =  ifelse(grepl("five_yr", modelfiles) == TRUE, paste(group, "five_yr", sep = "_"),
+                                     ifelse(grepl("ten_yr", modelfiles) == TRUE, paste(group, "ten_yr", sep = "_"),
+                                            group))) 
+```
+
+## Explore and combine
+
+Has it converged?
+
+```{r diag}
+MCMCStats <- lapply(output, function(msi) {
+  dat <- attr(msi, "model")$summary
+  dat[!grepl("^M", dimnames(dat)[[1]]), 8] #column 8 is rhat, column 9 is effective sample size
+})
+pars$Rhat3q <- sapply(MCMCStats, quantile, 0.75, na.rm=TRUE)
+```
+
+#### Extra exploration of model performance
+
+```{r diag_theta_dev}
+diagnostics  <- ldply(output, function(msi) {
+  dat  <- attr(msi, "model")$summary
+  rdat <- data.frame(theta_Rh     = dat[grepl("theta", dimnames(dat)[[1]]), "Rhat"],
+                     theta_Nef    = dat[grepl("theta", dimnames(dat)[[1]]), "n.eff"],
+                     deviance_Rh  = dat[grepl("dev", dimnames(dat)[[1]]), "Rhat"],
+                     deviance_Nef = dat[grepl("dev", dimnames(dat)[[1]]), "n.eff"])
+  })  %>% 
+  cbind(modelfiles) %>% 
+  select(5:1)
+```
+
+```{r, eval=FALSE}
+write.csv(diagnostics, 
+          file = file.path(qa_dir, "d4a_model_diagnostics_2026_130326.csv"), 
+          row.names = FALSE)
+```
+
+Stick them all together
+
+```{r comb}
+df <- do.call(rbind, output)
+attr(df, "model") <- NULL
+attr(df, "metadata") <- NULL
+```
+
+Now coerce the output into something useful:
+
+```{r Manipulate}
+pars$nyr <- c(sapply(output, nrow))
+
+df$group <- melt(mapply(rep, pars$group, pars$nyr))$value
+df$ypk <- melt(mapply(rep, pars$ypk, pars$nyr))$value
+df$n.knots <- melt(mapply(rep, pars$n.knots, pars$nyr))$value
+df$ypk <- factor(df$ypk)
+```
+
+```{r, eval=FALSE}
+write.csv(df,   file = file.path(modeldir, "MSI|group+_presmooth_allspp_to2024_130326.csv"))
+write.csv(pars, file = file.path(modeldir, "SmoothingParameters_allspp_to2024_130326.csv"))
+```
+
+# Unsmoothed trends
+
+An easier way to get the unsmoothed line for each group is to use the
+WBI method for creating an MSI. Let's see if this is a sensible way to
+plot unsmoothed trends. For this we need to get a version of the dataset
+with interpolated values
+
+We didn't save an interpolated version of the species time-series, so we
+need to generate this in next code block. Also, this is not truly an
+'unsmoothed' line, as it is using pre-smoothed time-series.
+
+Read in the script of tidying and indicator functions
+
+```{r src}
+source("/data/notebooks/rstudio-esaiukpsi26/tidy_functions.R")
+```
+
+Read in species time-series and process so can run IndFun  This
+involves:
+
+-   Converting to measurement scale
+-   Expanding the grid so that all spp/yr combinations have a row
+-   Interpolating across any missing values within a species time-series
+-   Holding the final value constant where a ts ends before 2024
+
+```{r sm_wbi}
+data1 <- read.csv("/data/tidy_data/d4a_spp_ts_engto24_Smoothed_unsmVP_120326.csv")
+
+#convert index2 back to measurement scale so tidying rqd and tidy_d functions work properly
+data24 <- data1 %>% 
+  mutate(index = exp(index2),
+         common_name = NA) %>% 
+  rename(scientific_name = species)
+
+#run tidying report
+tidy_rpt24 <- tidying_rqd(data24)
+
+#expand grid to add missing species year combinations, interpolate missing values within time-series and hold the final value constant where time-series end before the final year. There will be no zeros in the dataset at this stage
+data24_geom <- tidy_d(data = data24, tidy_rpt = tidy_rpt24 , exp.g = "Y", interp = "Y", exp_tail = "Y") %>% 
+  rescale(ind_col = index, Index_root = 1) %>% #rescale index
+  group_by(scientific_name) %>% 
+  fill(group, .direction = "updown") %>% 
+  fill(survey, .direction ="updown")
+  # add group and survey info into new extra cols
+    
+#calculate geometric mean all and by group
+all_geo <- indFun1(data24_geom, ind_col = index, grp_col = scientific_name) %>% 
+  mutate(group = "all")
+
+grp_geo <- ddply(data24_geom, .(group), indFun1, ind_col = index, grp_col = scientific_name) %>% 
+  full_join(all_geo) %>% 
+  rename(unsmoothedMSI = comp_index) %>% 
+  mutate(unsmoothedMSI = unsmoothedMSI*100)
+
+#merge with freeman model outputs
+df <- df %>% 
+  merge(grp_geo, by.x=c("Year", "group"), by.y=c("year", "group"), all = TRUE)
+```
+
+If we want to compare to an actual unsmoothed version, we would need to
+use the unsmoothed time-series and then process and calculate the
+geometric mean using 'IndFun'
+
+Read in unsmoothed time-series and do the same processing as above to
+get dataset ready to calculate the geometric mean
+
+```{r unsm_wbi}
+data_un <- read.csv("/data/tidy_data/d4_spp_timeseries_engto24_120326.csv")
+
+data_un24 <- data_un %>% 
+  rename(index_log = index,
+    scientific_name = scientific_name_data) %>% 
+  rename(index = index_m)
+
+#run tidying report
+tidy_rpt_un24 <- tidying_rqd(data_un24)
+
+#expand grid to add missing species year combinations, interpolate missing values within time-series and hold the final value constant where time-series end before the final year. There will be no zeros in the dataset at this stage
+data_un24_geom <- tidy_d(data = data_un24, tidy_rpt = tidy_rpt_un24 , 
+                         exp.g = "Y", interp = "Y", exp_tail = "Y") %>% 
+  rescale(ind_col = index, Index_root = 1) %>% #rescale index
+  group_by(scientific_name) %>% 
+  fill(group, .direction = "updown") %>% 
+  fill(survey, .direction ="updown")
+  # add group and survey info into new extra cols
+    
+#calculate geometric mean all and by group
+all_geo_un <- indFun1(data_un24_geom, ind_col = index, grp_col = scientific_name) %>% 
+  mutate(group = "all")
+
+grp_geo_un <- ddply(data_un24_geom, .(group), indFun1, ind_col = index, 
+                    grp_col = scientific_name) %>% 
+  full_join(all_geo_un) %>% 
+  rename(unsmoothedMSI = comp_index) %>% 
+  mutate(unsmoothedMSI = unsmoothedMSI*100)
+```
+
+plot geomean based on unsmoothed time-series
+
+```{r, fig.width=12, fig.height=6}
+ggplot(grp_geo_un, aes(x = year, y = unsmoothedMSI)) +
+  geom_line()+
+  geom_point()+
+  facet_wrap(~group, scales = "free_y")+
+  theme_bw()
+```
+
+# Plot indicator
+
+For simplicity we will plot only the smoothed M index.
+
+## Headine indicator
+
+```{r plot, fig.width=12, fig.height=6}
+gp0 <- ggplot(data = subset(df, group=="all"), aes(x=Year)) +
+  geom_ribbon(aes(ymin=lowerCI.M, ymax=upperCI.M), alpha = 0.1) +
+  geom_line(aes(y=Index.M)) 
+  geom_point(aes(y=unsmoothedMSI), col="red") +  
+  facet_wrap(~ypk, nrow=2) +
+  geom_hline(yintercept = 100) +
+  ylab("Index (baseline = 100)") +
+  theme_bw()
+gp0
+```
+
+Each panel here represents a different degree of smoothing. In all
+cases, smoothing on the log scale means that the long term trend is for
+a larger decline (than smoothing on the measurement scale)
+
+You can see clearly that, in the case with one knot per three years, the
+smoothed and unsmoothed lines are virtually identical. The impact of the
+smoothing becomes progressively clear as the smoothing window (number of
+years per knot) increases.
+
+The red dots here are from the WBI method for calculating the geometric
+mean. It's the same data plotted in all the panels. We would expect this
+to map on very closely to the 1 year per knot example. 
+
+## By taxon
+
+Plot separately for each taxon.
+
+```{r plot1, fig.width=12, fig.height=12}
+gp1 <- ggplot(data = df, aes(x=Year)) +
+  geom_ribbon(aes(ymin=lowerCI.M, ymax=upperCI.M), alpha = 0.1) +
+  geom_line(aes(y=Index.M)) +
+  geom_point(aes(y=unsmoothedMSI), col="red", size = .4) +  
+  facet_grid(group~ypk, scales = "free_y") +
+  ylab("Index (baseline = 100)") +
+  theme_bw()
+
+gp1  %+% subset(df, !group %in% c("all", "all_five_yr", "all_ten_yr")) + 
+geom_hline(yintercept = 100)
+```
+
+You can really see the effect of changing the number of knots on the
+moth trend.
+
+Zoom into the period since 2000 (including the "all" groups now)
+
+```{r, fig.width=12, fig.height=10}
+minYr <- 2000
+gp1  %+% subset(df, !group %in% c("all_five_yr", "all_ten_yr", "all")) + 
+  xlim(c(minYr, 2025))
+```
+
+In these plots, the uncertainty is expressed relative to the baseline
+(1970 for some groups). I could re-calculate the uncertainty ribbons so
+that they're measuring change relative to this new baseline.
+
+plot re-baselined all species 3ypk
+
+```{r}
+ggplot(data = subset(df, group %in% c("all", "all_five_yr", "all_ten_yr") & ypk == 3), aes(x=Year)) +
+  geom_ribbon(aes(ymin = lowerCI.M, ymax = upperCI.M, fill = group), alpha = 0.2 ) +
+  geom_line(aes(y = Index.M, col = group)) +
+  geom_hline(yintercept = 100) +
+  ylab("Index (baseline = 100)") +
+  scale_x_continuous(breaks = breaks_pretty()) +
+  theme_bw()
+```
+
+rescale to final year to make comparison easier and look post 2010
+
+```{r rebase}
+rb <- df %>% 
+  filter(group == "all" & ypk == 3| group ==  "all_five_yr"| group == "all_ten_yr" ) %>% 
+  group_by(group) %>% 
+  mutate(rel_final = Index.M/Index.M[Year == 2024])
+
+ggplot(rb, aes(x=Year)) +
+  geom_line(aes(y = rel_final, col = group)) +
+  ylab("Index (final year = 1)") +
+  scale_y_continuous( limits = c(.75, 2)) +
+  theme_bw() +
+  xlim(2010, 2025)
+```
+
+Differences between the different numbers of knots are not especially
+clear.
+
+```{r plotM2, fig.width=12, echo=FALSE}
+ggplot(data = subset(df), aes(x=Year)) +
+  geom_ribbon(aes(ymin=lowerCI.M, ymax=upperCI.M, fill=ypk), alpha = 0.2) +
+  geom_line(aes(y=Index.M, col=ypk)) +
+  facet_wrap(~group, ncol=3, scales = "free") +
+  geom_hline(yintercept = 100) +
+  ylab("Index (baseline = 100)") +
+  scale_x_continuous(breaks = breaks_pretty()) +
+  theme_bw()
+```
+
+For most groups, the choice of smoothing makes very little difference.
+There is an observable effect for plants, moths and butterflies.
+
+Now overlay the different Mprime (unsmoothed indicator) lines
+
+```{r plotM3, fig.width=12, echo=FALSE}
+ggplot(data = subset(df), aes(x=Year)) +
+  geom_line(aes(y=Index.Mprime, col=ypk)) +
+  facet_wrap(~group, ncol=3, scales = "free") +
+  geom_hline(yintercept = 100) +
+  ylab("Index (baseline = 100)") +
+  scale_x_continuous(breaks = breaks_pretty()) +
+  theme_bw()
+```
+
+This shows that the "unsmoothed" line (M.prime) is almost completely
+insensitive to the number of knots. This is particularly true for the
+taxon-specific trends, but less true of the all-species plot and plants.
+
+## Official plot
+
+Defra has decided that the preferred option is to present the
+`ypk = c(10, 3)` lines on the same plot, with `ypk = 1` as points
+representing the unsmoothed trend.
+
+```{r}
+prodplotAll <- ggplot(data = subset(df, group %in% c("all") & ypk %in% c(3, 10)), 
+                      aes(x=Year)) +
+  geom_ribbon(aes(ymin=lowerCI.M, ymax=upperCI.M, fill=ypk), alpha = 0.2) +
+  geom_line(aes(y=Index.M, col=ypk)) +
+  geom_point(data = subset(df, group %in% c("all") & ypk == 1), 
+             aes(x=Year, y=Index.M), col = "black") +
+  geom_hline(yintercept = 100) +
+  ylab("Index (baseline = 100)") +
+  scale_x_continuous(breaks = breaks_pretty()) +
+  theme_bw()
+prodplotAll
+```
+
+The unsmoothed (1 knot per year) line is almost identical to the 3
+years-per-knot line.
+
+Now for each taxonomic group
+
+```{r, fig.width = 12}
+prodplotTx <- ggplot(data = subset(df, !group %in% c("all", "all_five_yr", "all_ten_yr") & ypk %in% c(3, 10)), 
+                      aes(x=Year)) +
+  geom_ribbon(aes(ymin=lowerCI.M, ymax=upperCI.M, fill=ypk), alpha = 0.2) +
+  geom_line(aes(y=Index.M, col=ypk)) +
+  geom_point(data = subset(df, !group %in% c("all") & ypk == 1), 
+             aes(x=Year, y=Index.M), col = "black", size = .5) +
+  geom_hline(yintercept = 100) +
+  ylab("Index (baseline = 100)") +
+  scale_x_continuous(breaks = breaks_pretty()) +
+  theme_bw()
+
+prodplotTx + facet_wrap(~group, nrow=4, scales = "free")
+```
+
+We can see that the unsmoothed index is almost identical to the 3 years
+per knot line.
+
+NB several time-series don't quite have enough data for 10 years per
+knot.
+
+-   Bumblebees have 15 years of data, so we would really need one more
+    year for a second knot, according to the rules we set.
+-   Freshwater invertebrates have only 12 years of data; vascular plants
+    ten.
+-   In these cases the number of knots is two. This corresponds to 7.5
+    ypk for bumblebees, 6 ypk for FWI and 5 ypk for plants. We need to
+    capture this in the indicator documents.
+
+# Change metrics
+
+Now summarise the long-term, short-term and instantaneous change for
+each version of the index.
+
+## Long term
+
+The long term trend is the same, regardless of the number of knots.
+Let's report these as % change since the baseline.
+
+```{r}
+sf <- 3
+LongTerm <- subset(df, ypk == 10, select = !grepl("prime", names(df))) %>% 
+  group_by(group) %>%
+  filter(Year == max(Year)) %>%
+  mutate(Index.M = signif(Index.M - 100, sf),
+         lowerCI.M = signif(lowerCI.M - 100, sf),
+         upperCI.M = signif(upperCI.M - 100, sf)) %>%
+  dplyr::rename(BestEst = Index.M,
+                lowerCI = lowerCI.M,
+                upperCI = upperCI.M)
+
+LongTerm[,c(6,5,2:4)]
+```
+
+The lower and upper CI represent the 95% credible intervals. This means
+we are 95% confident that the true value lies within this range.
+
+## Short Term assessment
+
+We would need to go back to the `output` object in order to get the CI.
+For now, then, I'll just report the best estimate of change over the
+past 5 years (i.e. 2017-2022 for the most)
+
+```{r}
+TimeboundChange <- function(x, metric="ind", t=5){
+  temp <- subset(df, group == x["group"][[1]] & ypk == as.numeric(x["ypk"][[1]])) 
+  Y1 <- max(temp$Year, na.rm=TRUE)
+  Y0 <- Y1 - t
+  temp2 <- subset(temp, Year %in% c(Y0, Y1))
+  stat <- diff(temp2$Index.M)
+  if(metric == "pc"){ # convert to a percentage
+    stat <- 100 * stat / temp2[temp2$Year==Y0,"Index.M"]
+  }
+  round(stat,1)
+}
+
+tempch <- apply(pars, 1, TimeboundChange, metric="ind", t=5)
+ShortTerm1 <- cbind(pars[c(1,2,5)], change=tempch)
+(ShortTerm1 <- acast(ShortTerm1, group~ypk, value.var="change"))
+```
+
+Each column represents a different degree of smoothing (number of knots
+per year). Note that, when pre-smoothing happens on the log scale, there
+is very little variation in the 5 year trend. When smoothed on the
+measurement scale, the magnitude of change varies by 100% for moths and
+butterflies.
+
+Values in this table are relative to the baseline conditions in the
+first year. Let's repeat these calculations but calculate change as a
+percentage of the value five years ago.
+
+```{r}
+change <- apply(pars, 1, TimeboundChange, metric="pc", t=5)
+ShortTerm1 <- cbind(pars[c(1,2,5)], change=change)
+(ShortTerm1 <- acast(ShortTerm1, group~ypk, value.var="change"))
+```
+
+## Final year change
+
+Finally, let's look at the value of the first derivative in the final
+year. Again, we'll express this as a percentage of the previous year's
+value.
+
+```{r}
+finalYrChange <- function(mod){
+    modsum <- attr(mod, "model")$summary
+    logLam <- modsum[grepl("logLambda", dimnames(modsum)[[1]]),]
+    ll <- logLam[nrow(logLam),c(1,3,7,11)]
+    ll[1:3] <- 100 * (exp(ll[1:3]) - 1)
+    signif(ll, 2)
+}
+
+# log scale pre-smoothing
+FinalYr <- t(sapply(output, finalYrChange))
+(FinalYr <- cbind(pars[,c(1,2,3)], FinalYr))
+```
+
+The `f` column indicates the proportion of the posterior distribution
+that is the same sign as the mean, i.e. our confidence in the direction
+of the trend. Values close to 1 indicate high confidence; values close
+to 0.5 (the minimum) indicate low confidence in a change. Note that, in
+most cases, our estimates are quite confident (i.e. `f > 0.8`), meaning
+that we reject the "no change" category.
+
+### Summary of final year
+
+In general there is both quantitative and qualitative agreement between
+the different degrees of smoothing: 
+
+- Birds are declining by 0.72-1.6%pa 
+- Bumblebees are declining at 7.5-8.1% pa 
+- Butterflies are declining by 16-17% pa 
+- freshwater invertebrates are declining by 0.52 to increasing by 0.24% pa 
+- Mammals are increasing at 1.2to1.3% pa 
+- Moths are declining by 9.1 - 12% pa 
+- Fish are declining at 1.2 to 2.6% pa 
+- Plants are increasing by 1.8 to 2.6 % pa
+
+-   For "all" there is a decline of 4.7 to 5.6%pa for three of the
+    smoothed options.
+
+# Species-level trends
+
+We first need to identify the two "all species" runs
+
+```{r}
+#we need to filter out the re-based model outputs
+output     <- output[-grep("_yr", names(output))]
+#need to remove re-based models for this to work properly 
+modelfiles <- modelfiles[-grep("_yr", modelfiles)]
+```
+
+```{r}
+getSpTrends <- function(name, n = 0){
+  # `n` is an optional variable determining the number of years over which to estimate the trend
+  # if zero then the full series is used. If an integer above zero then the final `n` years of the series is used 
+  mod <- attr(output[[grep(name, modelfiles)]], "model")
+  spg <- mod$mean$spgrowth
+  estimate <- mod$data$estimate # the raw data. Has one more column than spg
+
+  if(n > 0){
+    # short term assessment. Restrict spg to the last n years
+    N <- dim(spg)[2]
+    spg <- spg[,(N-n):N]
+    estimate <- estimate[,(N-n):N]
+  } else {
+    estimate <- estimate[,-1]
+  }
+  
+  spMGR <- sapply(1:nrow(spg), function(i){
+    rates <- spg[i,!is.na(estimate[i,])]
+    mean(rates[-1]) # ignore first value - this is the first year with data so the GR is from other species
+  })
+  
+  names(spMGR) <- dimnames(estimate)[[1]]
+  100*(exp(spMGR)-1)
+}
+
+spTrends <- lapply(c(0,5), function(n){
+  x<-as.data.frame(do.call(cbind, lapply(list("all_3", "all_10"), getSpTrends, n=n)))
+  names(x) <- paste0(c("ypk3", "ypk10"), "_",n)
+  x
+})
+spTrends <- do.call(cbind, spTrends)
+head(spTrends)
+```
+
+The `ypk3_0` column is the long term trend when smoothed with three
+knots per year. The `ypk10_5` column is the short term trend (last 5
+years) when smoothed with ten knots per year. etc etc. All trends are
+measured as the mean across years, converted to a percentage
+increase/decrease in abundance
+
+Take a look at the overall distribution
+
+```{r}
+ggplot(data=melt(spTrends)) + 
+  geom_freqpoly(aes(value, col=variable), bins = 25) +
+  xlab("species trend (%/yr)") +
+  theme_bw()
+```
+
+Some very large values! Let's look at the quantiles.
+
+```{r}
+pc <-  c(1,5,10,25)
+signif(apply(spTrends, 2, quantile, c(pc/100,0.5,sort(1-pc/100)), na.rm=T),2)
+```
+
+We need to include the `na.rm=T` because there is a small number of
+species with no data in the last 5 years
+
+This clearly shows that most species trends are within the range of what
+we would expect. The short-term trends are absolutely larger than the
+long-term: again this is what we expect (short term trends are subject
+to noisy fluctuation).
+
+For the long-term trends:
+
+-   half of all species are in the range [-2.3 to +1.7 pa]
+-   80% of species are within the range [ -4.8 to +4.3 pa]
+-   90% of species are in the range [-6.7 to +6.6 pa]
+-   99% of species are in the range [-11 to +13 pa]
+-   There is a small minority of species with extreme trends outside
+    this range
+
+## Extreme species trends
+
+Take a look at the raw data for the most steeply declining species
+
+```{r}
+losers <- subset(spTrends, ypk3_0 < -11)
+losers
+ggplot(data = subset(data1, species %in% rownames(losers)),
+       aes(x=year, y=index2, col=species)) +
+    geom_line() +
+  theme_bw()
+```
+
+-   Moths
+    -   Abraxas sylavata - clouded magpie zeros in many recent years
+    -   Orthonama vittata- oblique carpet zeros in some recent years
+-   Bumblebee - Bombus campestris
+-   Fw invert
+    -   Halipius confinis zero in 2024
+    -   Lmnephilus extricatus
+    -   Notonecta viridis
+    -   Rhyacophilia fasciata
+-   Plants
+    -   Dioscorea communis aka tamus communis
+    -   Hordeum secalinum
+-   Fish
+    -   Osmerus eperianus smelt
+
+And the steepest increases
+
+```{r}
+winners <- subset(spTrends, ypk3_0 > +13)
+winners
+ggplot(data = subset(data1, species %in% rownames(winners)),
+       aes(x=year, y=index2, col=species)) +
+    geom_line() +
+  theme_bw()
+```
+
+-   Fish
+    -   Ammodytes tobianus - lesser sandeel, sparse data in recent
+        years, smoothed trend looks odd
+-   Other species trends seem to reflect underlying data
+    -   Clupea harengus - herring
+    -   Liza ramada - thin lipped grey mullet
+    -   Cobitis taenia - spined loach
+    -   Pomatoschistus microps - common goby
+-   Bumblebees: Bombus lucorum/terrestris
+-   Moth: Mythiman ablipuncta - white-point
+-   FW inv: Dryops spp., Nigrobaeis spp, Potamanthus luteus
+-   Bird: Milvus milvus - Red Kite (reinforcement), Platalea
+    leucorodia - spoonbill (coloniser)
+-   Butterfly: Maculinea arion - Large Blue, reintroduced, rapid
+    recovery
+
+## Categories of change
+
+Get the group identity and summarise into categories and report the
+values for each group
+
+```{r}
+spTrends$group <- data1$group[match(rownames(spTrends), data1$species)]
+spTrends$survey <- data1$survey[match(rownames(spTrends), data1$species)]
+
+spTrends$longTrendCat <- cut(spTrends$ypk3_0, 
+                         breaks = c(-Inf, -2.73, -1.14, +1.16, +2.81, Inf),
+                         labels = c("Strong decrease", "Weak decrease", "Little change", "Weak increase", "Strong increase"))
+summary(spTrends$longTrendCat)
+
+spTrends$shortTrendCat <- cut(spTrends$ypk3_5, 
+                         breaks = c(-Inf, -2.73, -1.14, +1.16, +2.81, Inf),
+                         labels = c("Strong decrease", "Weak decrease", "Little change", "Weak increase", "Strong increase"))
+summary(spTrends$shortTrendCat)
+
+with(spTrends, table(group, longTrendCat))
+with(spTrends, table(group, shortTrendCat))
+```
+
+```{r, eval=FALSE}
+write.csv(spTrends, file = file.path(modeldir,"spTrends_allspp_to2024_130326.csv")) # unsm VP cat chg
+```
+
+Summarise species trends - based on categorisation of change from knots
+per 3 year model
+
+```{r}
+spTrend_grp <- spTrends %>% 
+  select(group, longTrendCat, shortTrendCat) %>% 
+  melt(id.vars = "group") %>% 
+  group_by(group, variable, value) %>% 
+  summarise(n_spp = n()) %>% 
+  group_by(group, variable) %>% 
+  mutate(pct_spp = n_spp/sum(n_spp[!is.na(value)]))
+         
+spTrend_sum <- spTrends %>% 
+  select(group, longTrendCat, shortTrendCat) %>% 
+  melt(id.vars = "group") %>% 
+  group_by(variable, value) %>% 
+  summarise(n_spp = n()) %>% 
+  group_by(variable) %>% 
+  mutate(pct_spp = n_spp/sum(n_spp[!is.na(value)]),
+         group = "all") %>% 
+  full_join(spTrend_grp) %>% 
+  rename(period = variable, trend_category = value) %>% 
+  mutate(trend_category = 
+           factor(trend_category,
+                  levels = c("Strong decrease", "Weak decrease", "Little change",
+                             "Weak increase", "Strong increase"))) %>% 
+  arrange(group, period, trend_category)
+```
+
+```{r, eval=FALSE}
+write.csv(spTrend_sum, file = file.path(modeldir, "spTrends_allspp_to2024_summary130326.csv"), row.names = FALSE)
+```

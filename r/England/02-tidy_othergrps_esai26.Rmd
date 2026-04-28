@@ -1,0 +1,704 @@
+---
+title: "Tidy_data_othergrps_d4ato22"
+author: "Fiona Burns/ Nick Isaac"
+opened: "22/02/24"
+root.dir: "/data"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+---
+
+
+Code adapted from script '02-tidy_othergrps_d4ato22.Rmd', in notebook
+'rstudio-indeengto22'
+
+This script: 
+
+-   Brings together datasets of England-scale species time-series, barring birds
+-   It consolidates their formats to allow merging and selects a single
+    time-series per species
+-   It removes data deficient species and does some data processing to
+    allow the time-series to be combined into an abundance indicator\
+
+### Load libraries
+
+Added renv to ensure all packages are saved with the project 
+```{r, echo=FALSE, message = FALSE}
+library(renv)
+library(reshape);library(plyr);library(dplyr);library(ggplot2);library(stringr);library(readxl); library(tidyr)
+#renv::snapshot()
+```
+
+### Load tidying functions
+```{r}
+source("/data/notebooks/rstudio-esaiukpsi26/tidy_functions.R")
+```
+
+# LOAD DATA
+
+- Get lepidoptera, mammal, fw invertebrate, vascular plant and fish datasets into consistent format
+- Process so have consistent column titles, scientific_name, common_name, index, year, country, index_sm
+- Average across time-series where more than one present for a species
+
+## LEPIDOPTERA
+
+### UKBMS butterfly data
+
+- We need to back transform index as currently on log10 scale
+```{r read_bfly}
+bfly  <- read.csv("/data/species-timeseries/insects/ukbmscollatedindices2024.csv")
+
+bfly1 <- bfly %>% 
+  mutate(index = 10 ^ bfly$COLLATED_INDEX ) %>% 
+  dplyr::rename(scientific_name = SPECIES, common_name = COMMON_NAME, year = YEAR, 
+         country = COUNTRY, sites = N_SITES, 
+         index.raw = COLLATED_INDEX, sp_no = SPECIES_CODE) %>%
+  filter(country == "England") %>%
+  select(-YEAR_RANK, -TIME_PERIOD, -country, -sp_no, -sites)
+
+rm(bfly)
+```
+
+### Rothamsted moth data
+ 
+- Assess how many psuedozeros (extremely low values and due to model can't give zero as an answer)
+- Convert psuedozeros to zeros.
+```{r read_ris}
+ris      <- read.csv("/data/species-timeseries/insects/Eng_ind_spp_yr_indices.csv") #read in time-series
+ris_name <- read.csv("/data/species-timeseries/insects/spp_names.csv") #read in species names
+
+ris <- ris %>% 
+  mutate(common_name     = as.character(ris_name$NAME_ENGLISH[match(ris$SPECIES, 
+                                                                    ris_name$SPECIES)]),
+         scientific_name = as.character(ris_name$NAME[match(ris$SPECIES, 
+                                                            ris_name$SPECIES)])) %>% 
+  dplyr::rename(sp_no = SPECIES, index = INDEX, year = YEAR, 
+                lcl_unsm = LOW_INDEX, ucl_unsm = UPP_INDEX)
+```
+
+How many species in the dataset?
+```{r}
+length(unique(ris$scientific_name)) 
+```
+(448) This more than the 441 species that we expected to get. The RIS analyst told us that they had included all the species that passed his automatic checks. These are not a perfect match for the species that were put into Schedule 2 of The Environmental Targets (Biodiversity) (England) Regulations 2023. No need to worry about this now: in the next step we'll filter the species list to match Schedule 2. 
+
+Now check the names
+```{r}
+temp <- unique(ris[,c("common_name", "scientific_name")])
+sum(is.na(temp$common_name))
+sum(is.na(temp$scientific_name))
+```
+
+There is one species with no name. Which is it?
+```{r}
+head(ris[is.na(ris$common_name),])
+```
+Species number 684 was not in previous dataset. It's therefore not in Schedule 2 so we can ignore for now and drop.
+
+Next we'll look for small values. The RIS models are a little different to the UKBMS, even though they are structurally very similar. The main difference is that the index values actually relate to the raw data. Whereas in UKBMS the index values are all scaled to have a mean of 2 (which is log10(100)), the fitted values from RIS models are the expected number of moths on the whole scheme for that year This is really helpful for looking at small values, for there are some moths that genuinely small values, including zero counts. This reflects the much smaller number of sites on the RIS (~80) compared with UKBMS (>>1000), and the fact that some formerly common moths have experienced precipitous declines. So, we need to identify where there are zero counts and modify them, because they exert an undue weight on the final indicator line. 
+
+How many instances are there where the index is < 0.0001 and how many species are affected?
+```{r}
+table(cut(ris$index, breaks = c(0,0.0001,0.001,0.01,0.1,0.5,1,2,Inf)))
+```
+You can see that most values are higher than one. There is a small number where the fitted value lies between 0.1 and 1 individual. We can keep these: they will be unlikely to exert a big influence on the multispecies index. But we need to be worried about the 679 really small values. The reason to be concerned is that, when log-transformed, these tiny numbers will exert an undue weight on the fitted line.
+
+NB when the estimate is in single figures the ci can span multiple orders of magnitude.
+
+Let's choose 0.001 as our cutoff (NB initially 0.0001 was used): the ten-fold increase captures just two extra species:year combinations. How many species are affected by these pseudozeros?
+```{r}
+pZ <- 0.001
+
+pseudoZeros_byspp <- ris %>% 
+  dplyr::group_by(scientific_name) %>% 
+  dplyr::summarise(pseudoZeros = sum(index <= pZ)) %>% 
+  filter(pseudoZeros != 0)
+nrow(pseudoZeros_byspp) 
+```
+123, which is 27% of species in the dataset. But recall the actual number of pseudozeros is tiny, just 679 out of more than 24,000 observations (2.8%).
+
+Next, we want to know whether these pseudozeros are concentrated near the end of the timeseries
+```{r}
+pseudoZeros_byYr <- ris %>% 
+  group_by(year) %>% 
+  dplyr::summarise(pseudoZeros = sum(index <= pZ)) %>% 
+  filter(pseudoZeros != 0)
+plot(pseudoZeros_byYr, type = "b")
+```
+
+There are three spikes, in 2016, 2021 and 2024 and there is an upward trend. 
+
+Potential development option: It would be useful to further investigate the way we treat zeros and these psuedozeros. It may be that adding 1% of the average across all index values for a species is too high for groups like moths where interannual variation can be considerable. Other work noted that the controlled psuedozeros were in some cases higher than non-zero counts, which warrants further investigation.
+
+As noted above, these extremely low values in RIS should be treated as zeros. They occur when no moths have been recorded, but the model is on the log scale and therefore can't "predict" an actual zero ( `log(0) = -Inf`). Having defined our threshold, `pZ`, above, we'll set all these to be zero. At a later step, these will be converted to some other value.
+
+```{r}
+ris1 <- ris %>%
+  filter(!is.na(scientific_name)) %>% #rm species with no name match
+  mutate(index.raw = index) %>% 
+  mutate(index = ifelse(index < pZ, 0, index)) %>% #change extremely small values to zero
+  select(-NBOOT, -NSITES, -NSITES_POS) 
+rm(ris, ris_name)
+```
+
+
+### BC priority moth monitoring dataset  
+
+-   New data file doesn't have scientific names, so load old data and match names first
+```{r read_priorm}
+# Load the old file that contains scientific names
+pri_m_lookup <- read.csv("/data/species-timeseries/insects/priority_moth_indices_to_2021_SM_scientific.names.csv") %>%
+  rename(common_name = common.name, scientific_name = scientific.name) %>%
+  mutate(
+    common_name_lower = str_trim(str_to_lower(common_name)),  # Store lowercase for matching
+    scientific_name_lower = str_trim(str_to_lower(scientific_name)),  # Store lowercase for matching
+    scientific_name = str_trim(scientific_name)  # Keep original capitalization
+  )
+
+# Load and process pri_m1 dataset
+pri_m1 <- read.csv("/data/species-timeseries/insects/scarce_moth_trim_indices_to_2023_filtered.csv") %>% 
+  rename(year = time, index = imputed, se = se_imp, common_name = Species) %>% 
+  select(-X) %>%
+  mutate(
+    common_name_lower    = str_trim(str_to_lower(common_name)),  # Store lowercase for matching
+    original_common_name = common_name  # Retain original common name for output
+  )
+
+# First try to match using common_name (case-insensitive matching)
+pri_m1 <- pri_m1 %>%
+  mutate(scientific_name = 
+           pri_m_lookup$scientific_name[match(common_name_lower, pri_m_lookup$common_name_lower)]) %>% 
+# Find rows that still have NA in `scientific_name` (possible scientific names in `common_name` column)
+  mutate(scientific_name = ifelse(
+    is.na(scientific_name),
+    pri_m_lookup$scientific_name[match(common_name_lower, pri_m_lookup$scientific_name_lower)],
+    scientific_name
+  )) %>% 
+# Keep only the required columns
+  select(scientific_name, common_name, year, index, se) #nsite, time, imputed, se_imp,
+
+# Check how many names matched
+matched_names <- sum(!is.na(pri_m1$scientific_name))
+total_names   <- nrow(pri_m1)
+#281 matched names out of 305 total names
+
+# Find and print unmatched names
+unmatched_names <- pri_m1 %>%
+  filter(is.na(scientific_name)) %>%
+  select(common_name) %>%
+  distinct()  # Remove duplicates
+# Print summary
+cat("Number of unmatched common names:", nrow(unmatched_names), "\n")
+# Print the unmatched names
+print(unmatched_names)
+
+# From NBN Atlas - https://nbnatlas.org/
+# Barberry carpet - Pareulype berberata
+# Fisher's Estuarine - Gortyna borelii 
+pri_m1 <- pri_m1 %>% 
+  mutate(scientific_name = ifelse(common_name == "Barberry Carpet", "Pareulype berberata",
+                                  ifelse(common_name  == "Fisher's Estuarine", "Gortyna borelii",
+                                         as.character(scientific_name))))
+rm(pri_m_lookup, unmatched_names)
+summary(pri_m1$index)
+
+#are there are data deficient species?
+pri_m1 %>% 
+  group_by(common_name) %>% 
+  summarise(min_yr = min(year[!is.na(index)]),
+            max_yr = max(year[!is.na(index)])) %>% 
+  mutate(dur = max_yr - min_yr) %>% 
+  filter(dur < 10) 
+```
+There are two species with less than ten years data  
+
+-   One is new (in 2025) and so not on SI (Fisher's Estuarine) (five years)
+-   One is on SI, but earlier data has been deemed too sparse to contribute - Straw Belle (six years)
+-   We could either retain the latter as it will get to the minimum of ten years, or exclude until that point. Taken latter approach.
+
+There are some zeros, but no negative numbers. This confirms the values are fitted counts, not on the log scale.\
+
+
+## BUMBLEBEES 
+
+- Need to melt to df format
+- Sort out names
+
+Bombus lucorum and terrestris are named on Schedule 2 as a species group, but the data contains estimates for the two species individually as well as the group. For now we'll proceed with the grouped data. 
+-   lucter is only the data that could not be split by species 
+-   All the lucter data are added to both single species datasets
+
+Potential development option: We could consider alternative approaches, either taking an average of the B. lucorum and B terrestris time-series or including the terrestris and lucorum estimates in with the lucter data.
+
+```{r read_bbees}
+bbees <- read.csv("/data/species-timeseries/insects/national year averages 2010-25 06012026.csv")
+
+bumbles_to_include <- c("Bombus pascuorum", "Bombus lapidarius", "Bombus pratorum", "Bombus hypnorum", 
+                        "Bombus hortorum",  "Bombus lucorum", "Bombus terrestris", "Bombus lucter", 
+                        "Bombus vestalis",  "Bombus sylvestris", "Bombus campestris", "Bombus rupestris",
+                        "Bombus humilis")
+
+bbees1 <- bbees %>%
+  pivot_longer(
+    cols = -Year,
+    names_to = "scientific_name",
+    values_to = "index",
+    values_drop_na = FALSE) %>%
+  mutate(sd = ifelse(grepl("sd", scientific_name) == TRUE, "sd_unsm", "ind"),
+         scientific_name = gsub(".sd", "", scientific_name)) %>% 
+  pivot_wider(names_from = sd, values_from = index) %>% 
+  filter(scientific_name != "Apis") %>% # remove honeybee index
+  mutate(scientific_name = paste("Bombus", scientific_name)) %>%
+  rename(year = Year,
+         index = ind) %>%
+  mutate(common_name = NA_character_) %>%
+  filter(scientific_name %in% bumbles_to_include,
+         year < 2025 ) #data is a year ahead, remove final year
+
+rm(bbees, bumbles_to_include)
+summary(bbees1$index)
+```
+
+The summary clarifies that all the values are positive numbers, so we can be confident they are on the abundance scale (not the log scale).
+
+
+## MAMMALS
+  
+### BBS Mammals
+```{r read_bbsm}
+bh <- 
+  read.csv("/data/species-timeseries/mammals/bbs-mammal-index-for-eng_brown_hare.csv") %>% 
+  mutate(common_name = "Brown Hare")
+rab <- 
+  read.csv("/data/species-timeseries/mammals/bbs-mammal-index-for-eng_rabbit.csv") %>% 
+  mutate(common_name = "Rabbit")
+fox <- 
+  read.csv("/data/species-timeseries/mammals/bbs-mammal-index-for-eng_red_fox.csv") %>% 
+  mutate(common_name = "Red Fox")
+fald <- 
+  read.csv("/data/species-timeseries/mammals/bbs-mammal-index-for-eng_fallow_deer.csv") %>% 
+  mutate(common_name = "Fallow Deer")
+rowd <- 
+  read.csv("/data/species-timeseries/mammals/bbs-mammal-index-for-eng_roe_deer.csv") %>% 
+  mutate(common_name = "Roe Deer")
+
+bbs_names <- read.csv("/data/species-timeseries/mammals/species_codes.csv")
+
+bbs_mam <- bh %>% 
+  full_join(rab) %>% 
+  full_join(fox) %>% 
+  full_join(fald) %>% 
+  full_join(rowd) %>% 
+  left_join(bbs_names) %>% 
+  dplyr::rename(index = Unsmoothed, year = Year, index_sm = Smoothed, 
+         lcl_sm = Confidence.Interval..low., ucl_sm = Confidence.Interval..high.) %>% 
+  select(-species_code)
+
+rm(bh, rab, fox, fald, rowd, bbs_names)
+summary(bbs_mam$index)
+```
+
+### National Water Vole Monitoring Scheme
+```{r read_wv}
+wvol <- 
+  read.csv("/data/species-timeseries/mammals/wvoletrends_2024_FB.csv", 
+           skip = 5, nrows = 10) 
+# Read only rows 6-14 from a CSV file
+wvol <- wvol %>% 
+  mutate(common_name = "Water Vole", scientific_name = "Arvicola amphibius")%>%
+  rename(index_sm = smoothed_index, index = unsmoothed_fit,  
+         lcl_sm   = smoothed_lower, ucl_sm = smoothed_upper,
+         lcl_unsm = unsmoothed_lower, ucl_unsm = unsmoothed_upper) %>% 
+  select(common_name, scientific_name, index, lcl_unsm, ucl_unsm, index_sm, 
+         year, lcl_sm, ucl_sm)
+```
+NB. time-series 10 years long
+
+
+### Dormouse - NDMP 
+```{r read_dor}
+dor  <- read_excel("/data/species-timeseries/mammals/2024 NDMP dataset.xlsx",
+                   skip = 2)
+head(dor)
+colnames(dor)<-c("year", "common_name", "counts", "sites", "mean_count", 
+                 "index_sm", "se_sm", "lcl_sm", "ucl_sm", 
+                 "index", "se_unsm", "lcl_unsm", "ucl_unsm", 
+                 "source")
+
+dor1  <- dor %>% 
+  mutate(scientific_name = "Muscardinus avellanarius",
+         common_name = "Dormouse") 
+
+rm(dor)
+summary(dor1$index)
+```
+
+
+### NBMP data 
+
+- no common name, get from 2017 data
+- remove roost survey from common and sop pip as known to be negatively biased, not used in C8
+- In C8 and in previous iteration of this indicator we have only used data from 1998 across all species and surveys.  We have asked BCT about this and they recommended using data from 1998 onward.
+```{r read_bats}
+bat      <- read.csv("/data/species-timeseries/mammals/Species trend indices and CIs.csv", 
+                     skip=1)
+bat_name <- read.csv("/data/species-timeseries/mammals/NBMP_country_2017.csv")
+
+bat1  <- bat %>% 
+  dplyr::rename(year = Year, scientific_name = Species, index_sm = `Smoothed.index`, 
+               se = SE, lcl_sm = `Lower.95..CI`, ucl_sm = `Upper.95..CI`) %>% 
+  filter(!(Survey == "Roost Count" & scientific_name == "Pipistrellus pipistrellus"|
+           Survey == "Roost Count" & scientific_name == "Pipistrellus pygmaeus")) %>% 
+  filter(Geographical.scale == "England") %>% #filter to England sites
+  filter(!year < 1998) %>%  
+  mutate(common_name = as.character(bat_name$Species[match(scientific_name, bat_name$scientific_name)])) %>% 
+  mutate(common_name = ifelse(scientific_name == "Myotis mystacinus/brandtii",
+                              "Whiskered/Brandt's", as.character(common_name)))
+rm(bat, bat_name)
+```
+
+#### Take average of multiple time-series per bat species
+
+-   Need to get average time series for bats with more than one survey available
+-   Averaging using standard geomean function, so time-series need to be rescaled
+-   Need to check time-series don't have any missing values, beyond starting in different years
+-   Need to make sure that all time-series end in the same year.  
+
+Functions now in 'tidying_functions.R'\
+
+- function to calculate geometric mean [geometric]
+- function to calculate indicator, which requires a dataframe of species indices where each row is a species year combination [indFun1]
+- function to rescale time-series relative to first value [rescale]
+
+Which species have more than one survey per year?
+```{r}
+bat1 %>% 
+  group_by(scientific_name, Survey) %>% 
+  summarise(
+      min_yr = min(year[!is.na(index_sm)]),
+      max_yr = max(year[!is.na(index_sm)]),
+      yrs    = length(index_sm[!is.na(index_sm)])) %>% 
+  ungroup() %>% 
+  mutate(dur = max_yr - min_yr) %>% 
+  mutate(missing = ifelse(yrs == (dur + 1), "N", "Y"))
+```
+-   Serotine, Daubentons, Natterers, Brown long-eared, GHS, LHS have more than one time-series
+-   When set start year to 1998, only Natterers has different start years
+-   All Hibernation Surveys and missing a data point, this is 2021
+
+Processing required
+
+-   Expand to fill in missing spp/yr rows ('expand')
+-   Interpolate across missing values within ts ('approx')
+-   Rescale relative to first value ('rescale')
+```{r, fig.width=12}
+bat2 <- bat1 %>%  
+  expand(nesting(scientific_name, common_name, Survey), year = full_seq(year, 1)) %>% 
+  left_join(bat1) %>% 
+  group_by(Survey, scientific_name) %>% 
+  mutate(index_sm_int = approx(year, index_sm, xout = year, method= "linear")$y) %>% 
+  mutate(index_sm = ifelse(is.na(index_sm) & Survey == "Hibernation Survey", index_sm_int, index_sm)) %>% 
+  ungroup() %>% 
+  select(-index_sm_int)
+
+# only works using ddply not piped
+bat2 <- bat2 %>% 
+  ddply(.(Survey), rescale, ind_col = index_sm, Index_root = 1) %>% 
+  ungroup()
+
+# check bat time series
+ggplot(bat2, aes(x= year, y= index_sm, colour = Survey))+
+   geom_line()+
+  geom_point(size=.25)+
+  facet_wrap(vars(common_name), nrow = 2)
+```
+
+Average bats with more than 1 survey
+```{r, fig.width = 12}
+bat3 <- ddply(bat2, .(scientific_name), indFun1, index_sm, grp_col = Survey) %>% #again, only works via ddply
+  dplyr::mutate(common_name = bat2$common_name[match(scientific_name, bat2$scientific_name)],
+                index = comp_index) %>% #only dataset without unsmoothed option, just duplicate smoothed version
+  dplyr::rename(index_sm = comp_index)
+
+#check averaging has worked 
+ggplot() +
+  # bat2: all surveys
+  geom_line(
+    data = bat2,
+    aes(x = year, y = index_sm, group = Survey, colour = Survey),
+    linewidth = 0.4,
+    alpha = 0.35
+  ) +
+  geom_point(
+    data = bat2,
+    aes(x = year, y = index_sm, colour = Survey),
+    size = 0.25,
+    alpha = 0.5
+  ) +
+  # bat3: averaged trend (one line per species)
+  geom_line(
+    data = bat3,
+    aes(x = year, y = index_sm, group = 1),
+    linewidth = 0.4,
+    colour = "black"
+  ) +
+  facet_wrap(vars(common_name), nrow = 2) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, linewidth = 1))) +
+  theme_bw()
+```
+- all looks ok SM 18/02/26
+
+
+Check no dups spp/yr
+```{r}
+a <- with(bat3, table(scientific_name, year))
+table(a > 1)
+```
+
+Tidy up and summarise.
+```{r}
+rm(bat1, bat2)
+summary(bat3$index)
+```
+
+
+## FRESHWATER INVERTEBRATES
+
+These data are model outputs where the counts have been modelled on as `log10(x+1)`, so we need to back-transform them to predicted counts.
+```{r}
+Inverts25 <- 
+  read_excel("/data/species-timeseries/freshwater/ETI_235Inverts_update_to_2024.xlsx",
+             skip = 1)
+
+#check its a dataframe
+Inverts25 <- as.data.frame(Inverts25)
+#remove unneeded Taxon_codes
+Inverts25 <- Inverts25[, -(1:2)]
+
+fw_i1 <- Inverts25 %>%
+  reshape::melt(id.vars = c("Taxon_name"), variable_name = "year" )%>% 
+  mutate(year = as.numeric(as.character(year)), 
+          index = (10 ^ value) - 1, #backtransform from log10(x+1) scale
+          common_name = NA,
+          Taxon_name = gsub(" sp.", " spp.", Taxon_name)) %>% 
+  #change `sp.` in Taxon to `spp.` to match species list
+  mutate(Taxon_name = gsub("\\s*\\([^\\)]+\\)","", Taxon_name)) %>% 
+  #dataset has lots of subgenus names in brackets, doesn't match SI, remove
+  rename(scientific_name = Taxon_name, 
+         index.raw = value) 
+```
+
+check for values less than zero as cannot convert these to a log scale to create indicator. Treat as zeros
+```{r}
+fw_i1 %>% 
+  filter(index < 0) #5 instances where index is below zero on measurement scale, treat as zero
+```
+
+```{r}
+fw_i1 <- fw_i1 %>% 
+   mutate(index = ifelse(index < 0, 0, index)) 
+
+rm(Inverts25)
+summary(fw_i1$index)
+```
+
+## FISH
+
+These are Freshwater and coastal fish. These data have been modeled as a double square root transformation, i.e. the fourth root. So, to get back to the measurement scale we need to raise the data to the fourth power.
+```{r}
+fish25 <- 
+  as.data.frame(read_excel("/data/species-timeseries/freshwater/ETI_37Fish_update_to_2024.xlsx", 
+                           skip = 1))
+#check column names
+head(fish25)
+#remove unneeded columns
+fish25 <- fish25[, -(3:5)]
+
+fish1 <- fish25 %>% 
+   as.data.frame() %>% 
+   reshape::melt(id.vars = c("Species","Common name"), variable_name = "year") %>% 
+   mutate(year = as.numeric(as.character(year))) %>%  
+   mutate(index  = value ^ 4) %>% #backtransform from double square root scale
+   rename(common_name = "Common name",
+         scientific_name = "Species",
+         index.raw = value)
+
+rm(fish25)
+summary(fish1$index)
+```
+
+There are a few NAs: we know there was no survey in 2020 for any species (due to Covid) and some were also missing in 2021. Let's plot the data to check:
+```{r, fig.width=12}
+ggplot(fish1, aes(x = year, y = index)) +
+  geom_line()+
+  scale_y_log10() +
+  facet_wrap(vars(common_name), nrow=8, scales = "free_y")
+```
+
+Closer inspection reveals that the `index.raw` value for Herring in 2006 is actually negative.\ 
+In 2026 this is also now the case for a few other species too (Lesser sandeel and Common goby)
+```{r}
+subset(fish1, index.raw < 0)
+```
+This is a function of using data transformations rather than a GLM with link function. It's clearly another case where no organisms were observed and the model is producing spurious values. For some reason, the `index` value is actually positive. We should also treat these as zeros.
+
+convert the negative values in index.raw to zeros in the associated index column
+```{r}
+fish1 <- fish1 %>% 
+  mutate(index     = ifelse(index.raw < 0, 0, index))
+```
+
+## VASCULAR PLANTS
+
+- This year, for the first time we have England level time-series rather than uk. The values are weighted means, although the column is not called that.
+```{r}
+npms <- read.csv("/data/species-timeseries/plants/allEnglandTrends_2015to2024_04092025.csv") 
+
+npms1 <- npms %>% 
+  mutate(index = 100 * mean,
+         lcl_unsm = lo*100,
+         ucl_unsm = hi*100,
+         common_name = NA) %>%
+  dplyr::rename(scientific_name = species,
+                index.raw = mean, year=Year) %>% 
+  select(scientific_name, common_name, year, index, lcl_unsm, ucl_unsm, index.raw)
+
+summary(npms1$index)
+rm(npms)
+```
+-   all plant time-series are ten years long
+
+
+No duplication between data sources so no need to filter to a single time-series per species at this stage
+
+
+# AGGREGATE DATASETS
+
+### Join datasets into a list
+
+```{r}
+lm_l <- list(bfly1, ris1, dor1,  pri_m1, bbs_mam,  wvol, bat3,  fish1, fw_i1, bbees1, npms1)
+names(lm_l) <- c("ukbms", "ris", "ndmp", "prior_m", "bbs_m", "nwvmp", "nbmp", "fish", "fw_inv", "beewalks", "npms")
+```
+
+### Remove data deficient species
+
+Functions now read in from 'tidying_functions.Rmd' script\ 
+
+-   function to remove species with no data all, NAs or a comb of NAs and zeros [no_data]
+-   function to remove species years with no data [no_data_yr]
+-   function to remove species with a year range of less than ten years [rm_dpoor]
+
+Run no data yr, no data, and rm_dpoor
+```{r}
+lm_l1 <- llply(lm_l, no_data_yr)
+ldply(lm_l1, function(x) n_distinct(x$scientific_name));ldply(lm_l, function(x) n_distinct(x$scientific_name)) #none
+lm_l2 <- llply(lm_l1, no_data)
+ldply(lm_l2, function(x) n_distinct(x$scientific_name));ldply(lm_l1, function(x) n_distinct(x$scientific_name)) #none
+
+lm_l3 <- lm_l2
+lm_l3$prior_m <- rm_dpoor(lm_l3$prior_m) 
+ldply(lm_l3, function(x) n_distinct(x$scientific_name));ldply(lm_l2, function(x) n_distinct(x$scientific_name)) #none
+
+rm(lm_l1, lm_l, lm_l2)
+```
+-   To date we have only run rm_dpoor on moths in order to retain water vole and vascular plants, which had fewer than ten years of data
+-   Now could run 'rm_dpoor' on everything as WV and VP have reached ten years, action to update this in 2027
+
+
+#  PROCESS DATA
+
+For the species remaining make sure data are in the correct format to combine in a composite species index   
+
+The 'tidying_rpd' function produces a dataframe giving the number of species where:\ 
+
+- There are NAs at the start/within/at the end of species' time-series
+- There are zeros at the start/within/at the end of species' time-series
+- There are there missing rows in the time-series
+
+### Tidying required
+
+Run tidying required function across each dataset in list and save report 
+```{r}
+lm_tr <- llply(lm_l3, tidying_rqd)
+```
+
+Save tidy report
+```{r, eval=FALSE}
+lm_tr1 <- ldply(lm_tr)
+write.csv(lm_tr1[, c(1, 4, 2, 3)], file = "/data/tidy_data/intermediate_files/tidy_rpt_lepmam_engto24_120326.csv", row.names = FALSE)
+```
+
+### Tidying 
+
+The 'tidy_d' function allows user defined processing of datasets to:\
+
+- Add rows for missing species years
+- Convert zeros at the start of time-series to NAs
+- Where zeros are present within time-series add 1% of the average value of a species' time-series to all elements of it.
+- Use linear interpolation to fill in NAs within species' time-series
+- Hold final time-series values constant where they end before the final year of other species
+
+#### Run tidying function across list of datasets 
+
+Here we are processing the datasets ready for the Freeman model. So we need to:  \ 
+
+-   Remove zeros at the start of time-series
+-   Add 1% of mean ts value to all elements where >=1 elements == 0
+```{r}
+lm_tidy <- list(0)
+for(i in 1:length(lm_l3)) { 
+  lm_tidy[[i]] <- tidy_d(lm_l3[[i]], lm_tr[[i]], exp.g = "N", zero_st = "Y", zero_in = "Y")
+}
+names(lm_tidy) <- names(lm_l3)
+
+lm_tidy1 <- ldply(lm_tidy) %>% 
+  mutate(group = ifelse(.id == "ris"| .id == "prior_m", "moths",
+                        ifelse(.id == "ukbms", "butterflies", 
+                                ifelse(.id == "fish", "fish",
+                                      ifelse(.id == "fw_inv", "fw invertebrates",
+                                              ifelse(.id == "beewalks", "bumblebees",
+                                                     ifelse(.id == "npms", "vascular plants",
+                                          "mammals"))))))) %>%
+  select(.id, group, scientific_name, common_name, year, index, se,sd_unsm, lcl_unsm, ucl_unsm, 
+         index_sm, se_sm, lcl_sm, ucl_sm, index_orig, index.raw, uk_spp) %>% 
+  mutate(across(scientific_name:common_name, ~ str_to_lower(.x)))
+```
+
+### Save compiled dataset
+```{r, eval=FALSE}
+write.csv(lm_tidy1, file = "/data/tidy_data/intermediate_files/lep_mam_vp_compile_engto24_120326.csv", row.names = FALSE)
+```
+
+
+# CHECKS
+
+First check for duplicates 
+```{r, echo=FALSE}
+lm_tidy1 %>% 
+  group_by(group, scientific_name, year) %>%
+  summarise(instances = n()) %>% 
+  filter(instances > 1)
+```
+There are none
+
+Next, look for NAs.
+```{r}
+lm_tidy1 %>%
+  group_by(group) %>% 
+  summarise(instances = n(), sciNameNA = sum(is.na(scientific_name)), commonNA = sum(is.na(common_name)),
+            yearNA = sum(is.na(year)), indexNA = sum(is.na(index)))
+```
+We also know that not all of the datasets have common names. NAs for `index` are not unexpected: some were described above. 
+
+
+Number of species by group and survey
+```{r}
+ddply(lm_tidy1, .(group, .id), summarise, n_sp = n_distinct(scientific_name))
+```
+
+
+

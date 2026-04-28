@@ -1,0 +1,864 @@
+---
+title:  "Tidy and compile bird data to 2024 for ESAI"
+author: "Fiona Burns"
+opened: "20.01.26"
+root.dir: "/data"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      toc_collapsed: true
+    toc_depth: 3
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+Code adapted from script '01-tidy_bird_d4ato22.Rmd', in notebook
+'rstudio-indeengto22'
+
+This script: 
+
+-   Brings together datasets of England-scale bird species' time-series
+-   It consolidates their formats to allow merging and selects a single
+    time-series per species
+-   It removes data deficient species and does some data processing to
+    allow the time-series to be combined into an abundance indicator\
+
+### Load libraries
+
+```{r load lib, message = FALSE}
+library(reshape);library(reshape2);library(plyr);library(dplyr);library(ggplot2);library(stringr);library(readxl);library(tidyverse); library(lubridate); library(tidyverse); library(readxl)
+```
+
+### Load tidying functions
+
+```{r tidy_fun}
+source("/data/notebooks/rstudio-esaiukpsi26/tidy_functions.R")
+```
+
+# LOAD DATA 
+
+-   Get bird datasets into consistent format
+-   Process so have consistent column titles, scientific_name,
+    common_name, index, year, country, index_sm
+-   Add species names where missing
+-   Change all characters to lowercase
+
+## Load bird datasets
+
+Read in as lower case column names and lower case character fields\
+
+```{r load data}
+#WILD BIRD INDICATOR 
+wbi <- read.csv("/data/species-timeseries/birds/all_species_indices_7024.csv") %>%
+  set_names(tolower) %>%
+  mutate(across(where(is.character) | where(is.logical), ~ tolower(as.character(.))))
+
+colnames(wbi)[1] <- "x" #rename column 1 to x
+#read in the datasource for each species as data from many surveys contribute to the WBI 
+wbi_source <- 
+  read_excel("/data/species-timeseries/birds/Allspecies_england_unsmooth_7022.xls", 
+             sheet = "SP_SOURCES") %>% 
+  mutate(spcode = ifelse(nchar(spcode) < 5, paste(spcode, ".", sep = ""), 
+                         as.character(spcode))) 
+#a few species have four letters but no '.' to make them into five letter codes, creates matching errors
+
+
+#WINTERING WATERBIRD INDICATOR 
+wwbi    <- 
+  read.csv("/data/species-timeseries/birds/Defra_Indicators_Win_Waterbirds_Output2a_Species_Indices.csv") %>%
+  set_names(tolower) %>%
+  mutate(across(where(is.character) | where(is.logical), ~ tolower(as.character(.))))
+
+
+#RARE BREEDING BIRDS PANEL
+rbbp_uk_4c <- 
+  read_excel("/data/species-timeseries/birds/RBBP country totals 1973 to 2023_ME.xlsx", 
+                         sheet = "RBBP country totals 1973 to 202")%>%
+  set_names(tolower) %>%
+  mutate(across(where(is.character) | where(is.logical), ~ tolower(as.character(.))))
+
+
+#SCARABBS 
+scar_mae   <- 
+  read.csv("/data/species-timeseries/birds/SCARABBS data for four countries for SoN 2023.csv")%>%
+  set_names(tolower) %>%
+  mutate(across(where(is.character) | where(is.logical), ~ tolower(as.character(.))))
+
+#BREEDING BIRD SURVEY   
+bbs <- 
+  read.delim("/data/species-timeseries/birds/BTOBirdTrendsFigure_Gadwall_Long-term trend (1994–)_England.txt", 
+             comment.char="#") %>%
+  full_join(
+    read.delim("/data/species-timeseries/birds/BTOBirdTrendsFigure_Wheatear_Long-term trend (1994–)_England.txt", 
+               comment.char="#"))%>%
+  set_names(tolower) %>%
+  mutate(across(where(is.character) | where(is.logical), ~ tolower(as.character(.))))
+
+# UPLAND BIRD INDICATOR
+upind<-read.csv("/data/species-timeseries/birds/upland_species_indices_9424_revised.csv")%>%
+  set_names(tolower) %>%
+  mutate(across(where(is.character) | where(is.logical), ~ tolower(as.character(.))))
+```
+
+## Load auxilliary files 
+
+```{r load aux}
+#FILE WITH CONVERSION OF TWO LETTER/ FIVE LETTER BTO CODES TO SPECIES NAMES
+BTOCode             <- read.csv("/data/species-timeseries/birds/BTOBirdList_withCodes.csv")%>%
+  set_names(tolower) %>%
+  mutate(across(where(is.character) | where(is.logical), ~ tolower(as.character(.))))
+
+BTOCode <- BTOCode %>% 
+  mutate(across(c(common_name:scientific_name_in_hbw4, fiveletter), ~ str_to_lower(.x))) %>% 
+  mutate(five_letter = gsub("\\.", "", as.character(fiveletter)),
+         two_letter  = gsub("\\.", "_", as.character(twoletter))) %>% 
+  filter(!(common_name == "stonechat" & fiveletter == "stoch")) #two rows included for Stonechat
+
+#FILE WITH YEARS OF NATIONAL SURVEYS THAT CONFOUND RBBP TIMESERIES 
+rbbp_yrs_rm <- read.csv("/data/species-timeseries/birds/rbbp_yrs_to_rm_26.csv") %>% 
+  mutate(common_name = str_to_lower(common_name))
+
+#FILE WITH DATA SOURCE FOR UPLAND INDICATOR TO SELECT ONLY THOSE WITH all HABITAT BBS TRENDS or NATIONAL SURVEYS
+upland_src <- read_excel("/data/species-timeseries/birds/data_sources_enguk_2025.xlsx", sheet = "Sheet1") %>% 
+    rename_with(tolower) %>% 
+  mutate(across(where(is.character), tolower))
+```
+
+## Process datasets
+
+-   Filter to England only data and ensure a single time-series per
+    species per dataset
+-   Melt files to dataframe format
+-   Get consistent column names and remove any auxilliary columns
+-   Some minor duplication in WBI file. have raised with BTO, here we have selected time-series going back to 1970
+
+ENGLAND WILD BIRD INDICATORS
+
+```{r process_wbi}
+## Extract unsmoothed index, smoothed index,uncertainty measures, year, and species ID  for all species
+dup <- wbi %>% 
+  filter(country == "england") %>% 
+  group_by(species, year) %>% 
+  mutate(n = n()) %>% 
+  filter(n > 1) %>% 
+  ungroup() 
+
+wbi_m <- wbi %>% 
+  filter(country == "england") %>%
+  rename(common_name = species, two_letter = spp2ltr, five_letter = code5ltr,
+         index = unsmoothed, index_sm = smoothed_index)  %>% 
+  mutate(five_letter =  BTOCode$fiveletter[match(two_letter, BTOCode$twoletter)]) %>% 
+  #use two letter to add five letter code form BTOCode as in WBI file 
+  #greylag has NA for five letter code and 
+  #stonechat has a mismatch WBI/BTOCode as two five letter codes are available for this species 
+  mutate(source = wbi_source$survey[match(five_letter, wbi_source$spcode)]) %>% 
+  
+  #need to deal with duplication of yellow wag, lapwing and reed bunting in WBI dataset
+  #use column 'X' to do so as only way to distinguish the two time-series present per species
+  #waterways BBS joint trend was included as well as CBC/BBS trend  
+  filter(!(common_name == "lapwing" & x < 30000), #data runs from 33116 - 38512
+         !(common_name == "yellow wagtail" & x > 8000), #data runs from 7165 - 7701
+         !(common_name == "reed bunting" & x > 12000 )) %>%  #data runs from 10463 - 11009
+  select(scientific_name, common_name, two_letter, five_letter, source, year, index, index_sm) %>% 
+  as.data.frame()
+
+wbi_m %>% 
+  reframe(across(1:6, ~ table(is.na(.x)))) # no NAs in any of the name columns or year barring redpoll 
+#check removal of duplicates has worked
+wbi_m %>% 
+  group_by(common_name, year) %>% 
+  mutate(n = n()) %>% 
+  filter(n > 1)
+#no duplication now
+```
+
+OTHER DATASETS
+
+```{r process_other}
+#WWBI
+# Reformat date column to year for wintering water birds and filter to only include England data
+wwbi_m <- wwbi %>%
+  filter(country == "england", subgroup == "all") %>%  # Keep only rows where country is 'england'
+  mutate(year = year(ymd(date))) %>% 
+  rename(common_name = english_name, 
+         two_letter = two_character, five_letter = five_character,
+         index = unsmoothed_index, index_sm = smoothed_index) %>% 
+  select(two_letter, five_letter, year, index, index_sm)#, scientific_name, common_name)  
+#goose names not matching up to BTOCode file. 
+#Could either amend names in one or other, 
+#or remove scientific and common names from wwbi_m file and match on two letter codes, 
+#Take latter approach
+
+#RARE BREEDING BIRD PANEL
+rbbp_m <- rbbp_uk_4c %>% 
+  filter(country == "england" ,
+         `to_be_used_for_trends?` != "no") %>%
+  select( -years_of_data, -`years_>0`, 
+         -`%_present`,  -`to_be_used_for_trends?`,
+         -coverage_2014_assessment,-no., -country) %>% #
+  as.data.frame() %>% 
+  reshape2::melt(id.vars = c("common_name", "scientific_name","count_unit", "notes", "2020_lockdown_impact"), 
+       variable.name = "year") %>%
+  dplyr::rename(index = value, measure = notes) %>%
+  mutate(year = as.numeric(gsub("x", "", as.character(year)))) %>% 
+  left_join(rbbp_yrs_rm) %>% #add info on national survey years to remove
+  mutate(scientific_name = ifelse(scientific_name == "regulus ignicapillus",
+                                  "regulus ignicapilla", as.character(scientific_name))) 
+
+#BREEDING BIRD SURVEY 
+bbs_m  <- bbs %>%
+dplyr::select(common_name = english_name, year = year,  
+              index = unsmoothed_estimate, index_sm = smoothed_estimate,
+              lcl_sm = smoothed_lower_ci, ucl_sm = smoothed_upper_ci) %>% 
+   mutate(common_name = str_to_lower(common_name))
+
+#SCARRABS/ SBBS
+scar_m <- scar_mae %>% 
+  filter(country == "england", is.na(relevant.)) %>% 
+  select(-country, -relevant.) %>% 
+  reshape2::melt(id.vars = c("species", "notes"), variable.name = "year") %>%
+  dplyr::rename(common_name = species, index = value, notes = notes) %>%
+  mutate(year = as.numeric(gsub("x", "", as.character(year)))) %>% 
+  filter(grepl("rbbp", as.character(notes)) == FALSE)  # remove species where notes suggest RBBP is better
+ 
+up_m <- upind %>%
+  filter(country == "england") %>%
+  rename (common_name = english_name, two_letter = code2ltr,
+  index = unsmoothed, index_sm = smoothed) %>%
+  select(scientific_name, common_name, two_letter, year, index, index_sm) %>% 
+  mutate(source = upland_src$data_source[match(common_name, upland_src$common_name)],
+         inc_eng = upland_src$include_in_eng[match(common_name, upland_src$common_name)]) %>% 
+  mutate(source = ifelse(two_letter == "pw", "upland bbs squares", source)) %>% 
+  filter(source == "all bbs squares" & inc_eng == "y"|
+           source == "national surveys" & inc_eng == "y") 
+#filter to species with all bbs squares or national survey as 'data_source'
+#don't want to use upland only trends
+```
+
+## Aggregate datasets
+
+Stick the datasets into a list\
+
+```{r}
+bird_l <- list(wbi = wbi_m, wwbi = wwbi_m, rbbp = rbbp_m, scar = scar_m, bbs = bbs_m, up = up_m) #sbi=smp_m, 
+```
+
+Function to look up and add scientific_name and common name where not
+already present\
+
+```{r sci_name_fun}
+sci_n <- function(data) {
+   
+if(length(grep("scientific_name", as.character(names(data)))) == 0) { 
+  #if already scientific name column don't try to add it again
+  sc_source<- matrix(0, nrow(data), 1)
+   
+   #match the different 'name' columns of the bird datasets to btocode to get scientific name
+if(length(grep("common_name", as.character(names(data))) ) > 0) {
+   c_s = as.character(BTOCode$scientific_name[match(data$common_name, 
+                                                    BTOCode$common_name)] )
+  sc_source <- cbind(sc_source, c_s)
+  }
+if(length(grep("two_letter", as.character(names(data))) ) > 0) {
+ tl_s = as.character(BTOCode$scientific_name[match(data$two_letter, 
+                                                   BTOCode$twoletter)] )
+ sc_source <- cbind(sc_source, tl_s)
+}
+if(length(grep("five_letter", as.character(names(data))) ) > 0) {
+  fl_s = as.character(BTOCode$scientific_name[match(data$five_letter, 
+                                                    BTOCode$five_letter)] )
+  sc_source <- cbind(sc_source, fl_s)
+}
+  
+   #get scientific name concensus from one or more columns of sc_source
+ if(ncol(sc_source) == 2) {data$scientific_name <- as.character(sc_source[, 2])  }
+ if(ncol(sc_source) == 3) {data$scientific_name <- ifelse(is.na(sc_source[, 2]), 
+                                                      as.character(sc_source[, 3]), 
+                                                      as.character(sc_source[, 2]))}
+ if(ncol(sc_source) == 4) {data$scientific_name <- ifelse(is.na(sc_source[, 2] & 
+                                                                  is.na(sc_source[, 3],
+                                                                        sc_source[, 4],
+                              ifelse(is.na(sc_source[, 2], sc_source[, 3], 
+                                           sc_source[, 2])))))}
+}   
+  
+   #add in updated scientific name
+data$scientific_name_hbw4 <- 
+  ifelse(is.na(match(data$scientific_name,BTOCode$scientific_name_in_hbw4)),
+         BTOCode$scientific_name_in_hbw4[match(data$scientific_name, BTOCode$scientific_name)],
+         BTOCode$scientific_name_in_hbw4[match(data$scientific_name, BTOCode$scientific_name_in_hbw4)])
+                                       
+   
+    #add common name if not already present
+ if(length(grep("common_name", as.character(names(data))) ) == 0) {
+   data$common_name <- 
+     ifelse(is.na(data$scientific_name_hbw4), 
+            BTOCode$common_name[match(data$scientific_name, BTOCode$scientific_name)], 
+            BTOCode$common_name[match(data$scientific_name_hbw4, BTOCode$scientific_name_in_hbw4)])
+ }
+   
+  #add column to say whether native species or not  
+  data$uk_spp <- 
+    ifelse(is.na(data$scientific_name_hbw4), 
+          BTOCode$british_species_bocc[match(data$scientific_name, BTOCode$scientific_name)],
+          BTOCode$british_species_bocc[match(data$scientific_name_hbw4, BTOCode$scientific_name_in_hbw4)])
+ return(data)
+ }
+```
+
+## Add scientific and common names   
+
+Run sci_n function across dataframes   
+
+```{r}
+bird_l1 <- bird_l %>% 
+  llply(sci_n)
+#any species without scientific names?
+bird_l1 %>% 
+  ldply(function(x) table(is.na(x$scientific_name)))
+```
+
+# DATA CLEANING 
+
+Data cleaning required for different datasets   
+
+-   All: Remove non-native species
+-   All: Remove species with no data or only zero counts
+    -   Remove years without data
+    -   Remove time-series shorter than ten years
+-   Rbbp: remove national survey years and poor qual years specified in
+    rbbp_yrs_to_rm, remove covid impact years
+-   Scar/rbbp: remove where the number of years with counts above zero
+    equals 0 or 1, need median of at least three and max of at least ten
+    after trend starts and at least ten years
+-   Rbbp: for colonising/reintroduced species include time-series from
+    where consistent run of positive counts begin
+
+### Filter out non-native species 
+
+```{r}
+llply(bird_l1, function(x) unique(x$common_name[x$uk_spp == "n"|is.na(x$uk_spp)]))
+```
+
+-   Retain ruff, is native species, just matching issue, also red grouse
+    (now endemic species Lagopus scotica)
+-   Filter to native species
+-   Retain former breeders golden oriole and wryneck\
+
+```{r}
+bird_l1$rbbp <- bird_l1$rbbp %>% 
+  mutate(uk_spp = ifelse(is.na(uk_spp), "y", as.character(uk_spp)))
+
+bird_l1$up <- bird_l1$up %>% 
+  mutate(uk_spp = ifelse(is.na(uk_spp), "y", as.character(uk_spp)))
+
+bird_l2 <- bird_l1 %>% 
+  llply(function(x) filter(x, uk_spp == "y"| uk_spp == "former_breeder")) 
+```
+
+-   Red Grouse is now a full species (Lagopus scotica ), split from
+    Lagopus lagopus. updated in upland Ind, but not WBI [or in our
+    name conversion file]
+-   Here, as Red Grouse is replicated on both the WBI and Upland
+    indicator datasets and we will use the WBI one it doesn't matter that there is a name mismatch
+    in the upland one
+- Potential development option: Work in future years to update all our docs to the new global
+    naming system for birds and map back to what's used on SI.
+    
+### Remove data poor years for RBBP 
+
+-   National survey years
+-   Covid impacted years\
+
+```{r}
+bird_l2$rbbp <- bird_l2$rbbp %>% 
+  filter(is.na(reason_to_rm)) %>% 
+  mutate(`2020_lockdown_impact` = ifelse(is.na(`2020_lockdown_impact`), 
+                                  "low_unassessed", 
+                                  as.character(`2020_lockdown_impact`))) %>% 
+  filter(!(`2020_lockdown_impact` == "moderate" & year == 2020),
+         !(`2020_lockdown_impact` == "high" & year == 2020),
+         !(`2020_lockdown_impact` == "very high" & year == 2020)) %>% 
+  select(-reason_to_rm, -source)
+```
+
+Tidy up objects  
+```{r}
+rm(rbbp_uk_4c, wbi, wwbi, scar_mae, bbs, upind)
+```
+
+##### Functions now in the 'tidy_functions.R' script 
+
+-   function to remove species with no data all NAs or a comb of NAs and
+zeros [no_data]
+-   function to remove years with no data [no_data_yr]
+-   function to remove very rare species [scarce_data]
+-   function to remove species with a year range of less than ten years [rm_dpoor]
+
+### Remove data poor species/years 
+
+Run no_data_yr, no_data and rm_dpoor\
+```{r}
+bird_l3 <- llply(bird_l2, no_data) %>% 
+  llply(no_data_yr) %>% 
+  llply(rm_dpoor)
+#How many unique bird common names are in each dataset?
+res2 <- ldply(bird_l2, \(x) dplyr::n_distinct(x$common_name))
+res3 <- ldply(bird_l3, \(x) dplyr::n_distinct(x$common_name))
+print(res2)
+print(res3)
+#no species removed SM
+```
+
+Run scarce_data for datasets with absolute numbers of birds, rather than
+indices  
+
+```{r}
+bird_l3$rbbp <- scarce_data(bird_l3$rbbp) #11 rbbp species removed
+bird_l3$scar <- scarce_data(bird_l3$scar) #1 scar species removed
+ldply(bird_l3, function(x) n_distinct(x$common_name))
+rbbp_rem_species <- setdiff(bird_l2$rbbp$common_name, bird_l3$rbbp$common_name) 
+#rm 11 rbbp species in total, 36 left, rm one scar
+scar_rem_species <- setdiff(bird_l2$scar$common_name, bird_l3$scar$common_name) 
+#chough
+print(rbbp_rem_species)
+```
+
+-   Checked species removed and happy - RBBP/SCAR  05/02/2026
+
+### Colonising species 
+
+Check if any colonising species have initial intermittent counts  \  
+
+-   Wait until five consecutive positive counts, like for BoCC
+-   Rm cattle egret, five of ten years of data are zero counts, first year with five
+year run of positive counts is 2017. NOT on SI
+
+Following discussion with BTO and RBBP  \  
+
+-   RBBP shared extra data on confirmed breeding from 'coloniser data' file, 
+-   Agreed should base start date on 'confirmed breeding' rather than max pairs
+
+Here we take the first year of the first run of five consecutive years
+of confirmed breeding. So, we start:  \  
+
+-   Spoonbill at 2010, rather than 89
+-   Osprey starts from 2000, rather than 97
+-   Crane stays starting at 1981
+-   Great white egret start from 2012 rather than 2010
+-   Med Gull and Little Egret already in WBI, but for completion
+-   Med Gull starts in 79 not 76, and LEgret in 96 not 93
+
+Potential development option: Another defensible option would be to start after the first five
+consecutive years of breeding  \  
+
+-   The assumption being that the species is part of the breeding avifauna
+by then
+-   This would mean that spoonbill and GWE had fewer than ten years of data currently
+
+```{r colonising_rules}
+bird_l3$rbbp <- bird_l3$rbbp %>% 
+  filter(common_name != "cattle egret") %>% 
+  mutate(index = ifelse(common_name == "eurasian spoonbill" & year < 2010|
+                        common_name == "little egret" & year < 1996|
+                        common_name == "meditarrean gull" & year < 1979|
+                        common_name == "great white egret" & year < 2012|
+                        common_name == "osprey" & year < 2000, NA, index))
+```
+
+Check number of species per dataset\
+
+```{r}
+sapply(bird_l1, function(x) n_distinct(x$common_name))
+sapply(bird_l3, function(x) n_distinct(x$common_name))
+sapply(bird_l3, function(x) n_distinct(x$scientific_name))
+```
+
+# TIDY DATA
+
+For the species remaining make sure data are in the correct format to
+combine in a composite species index\  
+The 'tidying required' function produces a df giving the number of
+species where:\  
+
+-   There are NAs at the start/within/at the end of species' time-series
+-   There are zeros at the start/within/at the end of species' time-series
+-   Are there missing rows in the time-series
+
+## Tidying required 
+
+Run tidy report function on list of datasets and save\
+```{r}
+bird_tr  <- llply(bird_l3, tidying_rqd)
+```
+
+```{r, eval=FALSE}
+bird_tr1 <- ldply(bird_tr)
+write.csv(bird_tr1[, c(".id", "test", "Fail", "Pass")], 
+          file = "/data/tidy_data/intermediate_files/tidy_rpt_bird_engto24_120326.csv", row.names = FALSE)
+```
+
+## Tidying 
+
+The 'bird_tidy' functions allows user defined processing of datasets
+to:  \  
+
+-   Add rows for missing species years (exp.g)
+-   Convert zeros at the start of time-series to NAs (zero_st)
+-   Where zeros are present within time-series add 1% of the average value of a species' time-series to all elements of it (zero_in)
+-   Use linear interpolation to fill in NAs within species' time-series (interp)
+-   Hold final time-series values constant where they end before the final year of other species (exp_tail)
+
+#### Run tidying function across list of datasets 
+
+Here we are processing the datasets ready for the Freeman model. So we need to:  \ 
+
+-   Remove zeros at the start of time-series
+-   Add 1% of mean ts value to all elements where >=1 elements == 0
+```{r run_tidyd}
+bird_tidy <- list(0)
+for(i in 1:length(bird_l3)) {
+  bird_tidy[[i]]     <- tidy_d(bird_l3[[i]], bird_tr[[i]], exp.g = "N", zero_st = "Y", zero_in = "Y")
+}
+```
+
+Check again if some species have shorter than a ten year span  \  
+```{r}
+bird_tidy1        <- llply(bird_tidy, rm_dpoor)
+names(bird_tidy1) <- names(bird_l)
+sapply(bird_tidy, function(x) n_distinct(x$common_name))
+sapply(bird_tidy1, function(x) n_distinct(x$common_name)) # no difference 05/02/26 
+```
+
+Convert list to single dataframe and tidy up columns  \  
+```{r}
+bird_tdf  <- ldply(bird_tidy1);names(bird_tdf)
+bird_tdf1 <- bird_tdf %>% 
+  select(.id, common_name, scientific_name, scientific_name_hbw4, 
+        source,  year, index, index_sm, lcl_sm, ucl_sm, index_orig, uk_spp) 
+```
+
+Check if any latin names are matched with more than one common name and vice versa\  
+```{r}
+cn_per_sc <- ddply(bird_tdf1, .(scientific_name), summarise, ncn = length(unique(common_name)))
+cn_per_sc[cn_per_sc$ncn > 1, ]
+
+sn_per_cn <- ddply(bird_tdf1, .(common_name), summarise, nsn = length(unique(scientific_name)))
+sn_per_cn[sn_per_cn$nsn > 1, ]
+```
+
+Five common names and linked to two separate scientific names  \  
+
+-   black grouse 
+-   red grouse 
+-   dartford warbler 
+-   mediterranean gull 
+-   shoveler
+
+Four latin names and linked to two separate common names, usually just
+addition of 'common' or similar prefix \  
+
+-   Aythya ferina 
+-   Coturnix coturnix 
+-   Fulica atra 
+-   Phalacrocorax carbo
+
+#### Select a single common and scientific name per species 
+
+```{r}
+bird_tdf1 <- bird_tdf1 %>% 
+  mutate(scientific_name = ifelse(common_name == "shoveler", "anas clypeata", 
+                              ifelse(common_name == "dartford warbler", "curruca undata",
+                                     ifelse(common_name == "mediterranean gull", "ichthyaetus melanocephalus",
+                                            ifelse(common_name == "red grouse", "lagopus scotica",
+                                                   ifelse(common_name == "black grouse", "lyrurus tetrix", scientific_name))))), 
+           common_name =   ifelse(scientific_name == "aythya ferina", "pochard",
+                                  ifelse(scientific_name == "coturnix coturnix", "quail",
+                                        ifelse(scientific_name == "fulica atra", "coot",
+                                           ifelse(scientific_name == "phalacrocorax carbo", "cormorant",
+                                         as.character(common_name))))))
+```
+
+-   check this has worked\
+
+```{r}
+cn_per_sc <- ddply(bird_tdf1, .(scientific_name), summarise, ncn = length(unique(common_name)))
+cn_per_sc[cn_per_sc$ncn > 1, ]
+
+sn_per_cn <- ddply(bird_tdf1, .(common_name), summarise, nsn = length(unique(scientific_name)))
+sn_per_cn[sn_per_cn$nsn > 1, ]
+```
+
+-   save compiled data\
+
+```{r, eval=FALSE}
+write.csv(bird_tdf1, file = "/data/tidy_data/intermediate_files/full_tidydata_bird_engto24_120326.csv", row.names = FALSE)
+```
+
+# SELECT SINGLE TS PER SPECIES 
+
+### Define best data 
+
+Summarise which data are available per species and then select
+heirarchically\
+
+Heirarchy = sbi \> wbi \> up \>SCARRABS \> RBBP \> WaterbirdIndex\
+
+```{r}
+bird_sum <- bird_tdf1 %>%
+  group_by(scientific_name, .id) %>%
+  summarise(
+    data_av = sum(!is.na(index))) %>%
+  mutate(
+    .id = factor(.id, levels = c( "wbi", "up", "scar", "rbbp", "bbs", "wwbi")), #"sbi",
+    rnk = as.numeric(.id)
+  )
+```
+
+Filter out species time-series that do not correspond to the minimum
+rank per species\  
+```{r}
+bird_sum_sh <- bird_sum %>%
+  group_by(scientific_name) %>%
+  mutate(min_rnk = min(rnk, na.rm = TRUE)) %>%
+  filter(rnk == min_rnk)
+
+#any species with more than one row?
+bird_sum_sh %>% 
+  group_by(scientific_name) %>% 
+  summarise(n = n()) %>% 
+  filter(n > 1) #No
+```
+
+Save list of which survey to use per species\  
+```{r, eval=FALSE}
+write.csv(bird_sum_sh, file = "/data/tidy_data/intermediate_files/bird_bestdata_engto24_120326.csv", row.names = FALSE)
+```
+
+### Select best data 
+
+Filter total dataset to only have top ranked survey per species\  
+```{r filter_bestdata}
+bird_tdf_sh <- bird_tdf1 %>%
+  mutate(best_d = bird_sum_sh$.id[match(paste(.id, scientific_name), paste(bird_sum_sh$.id, bird_sum_sh$scientific_name))]) %>% 
+  filter(!is.na(best_d))
+```
+
+### Deal with geese 
+
+Geese are a particularly tricky group as they are monitored at a race
+level and some species have both native and feral populations\  
+
+The taxa on the SI are at species level, so we may need to average
+across time-series for different races\  
+
+-   The taxa on the S41 list are at race level 
+-   So the S41 list is NOT a subset of the SI
+
+#### What Goose data do we have? 
+
+```{r goose_dat}
+bird_tdf_sh$scientific_name <- as.character(bird_tdf_sh$scientific_name)
+
+geese <- bird_tdf_sh[grep("goose", as.character(bird_tdf_sh$common_name)), ]
+
+table(geese$best_d, geese$scientific_name)
+```
+
+Data available, updated 2026\  
+
+-   Anser brachyrhynchus wwbi
+-   Anser albifrons subsp. albifrons wwbi
+-   Anser anser (British/Irish) wwbi
+-   Branta bernicla subsp. bernicla wwbi
+-   Branta bernical subsp. Hrota S wwbi
+
+On S41 (priority sp) list\  
+
+-   Branta bernicla bernicla
+-   Anser Albifrons albifrons
+
+On SI (all species) list - all at species level\  
+
+-   Anser anser (greylag)
+-   Anser brachyrhynchus (pink foot)
+-   Anser albifrons (white-fronted)
+-   Branta bernicla (combined subsp. bernicla and Hrota S) (Brent)
+
+Action required\ 
+
+- S41 list  
+  - Retain Branta bernicla subsp. bernicla and A. alb alb for S41
+- SI list 
+  - Add copy of Anser albifrons subsp. albifrons at specific level for SI
+  - Average Branta bernicla subsp for SI (all sp list) 
+  - After averaging, remove Branta bernicla subsp. Hrota S as not needed at sub-spp level
+
+#### Averaging across species time-series 
+
+We need to calculate an average time series for geese with more than one
+survey available\  
+First we need to assess whether any processing is needed to allow us to
+use a basic geometric mean, or the IndFun function, which allows for
+staggered entry\  
+\  
+
+##### Functions now in 'tidying_functions.R' script\ 
+
+- function to rescale ts relative to first value [rescale]
+- function to calculate geometric mean [geometric]
+- function to calculate indicator, which requires a dataframe of species indices
+where each row is a species year combination [indFun1]
+\  
+
+#### Tabulate processing needed  
+
+-   When do they start and end and what is the first value of each
+    time-series
+-   Do they have missing values?
+
+```{r}
+geese_summary <- geese %>%
+  group_by(common_name) %>% 
+  summarise(across(index:index_sm, ~ min(year[!is.na(index)]), .names = "min_{.col}"),
+            across(index:index_sm, ~ max(year[!is.na(index)]), .names = "max_{.col}"),
+            yrs    = length(index[!is.na(index)]),
+            fvalue = index[year == min(year[!is.na(index)], na.rm = TRUE)]) %>% 
+  ungroup() %>% 
+  mutate(dur = max_index - min_index) %>% 
+  mutate(missing = ifelse(yrs == (dur + 1), "N", "Y")) 
+
+# Print result
+geese_summary
+```
+
+-   All end in year 2023
+-   Not rescaled (fvalue is not 1 or 100)
+-   All have missing years apart from pink footed goose (Anser
+    brachyrhynchus)
+
+Which years are missing?\
+
+```{r}
+geese %>% 
+  filter(((grepl("brent", common_name) == TRUE    & year == year[is.na(index)]| 
+          grepl("white-fronted", common_name) == TRUE) & year == year[is.na(index)]|
+          grepl("greylag", common_name) == TRUE) & year == year[is.na(index)]|
+          grepl("barnacle", common_name) == TRUE & year == year[is.na(index)])
+```
+
+-   Single missing year of 2020 for all sp except pink footed\
+
+Plot time series
+```{r, fig.width=9, fig.height=6}
+geese1 <- geese %>% 
+  filter(scientific_name != "anser brachyrhynchus")
+             
+ggplot(geese1, aes(x = year, colour = scientific_name)) +
+  geom_line(aes( y = index)) +
+  geom_line(aes(y = index_sm), lty = 3) +
+  facet_wrap(vars(scientific_name), nrow = 2) 
+```
+
+#### Process goose time-series for averaging 
+
+Brent goose races, for both index and index_sm\
+
+```{r}
+geese %>% 
+  filter(grepl("brent", common_name) == TRUE & year == year[is.na(index)])
+```
+
+Processing needed\ 
+
+-    We have a single common missing year, so we do not need to interpolate over it 
+-    We need to re-scale the ts to a common initial value 
+-    As the two ts start in the same year, we can take a basic geomean rather than run IndFun, which controls for staggered entry 
+-   We need to do this for both the 'index' and 'index_sm' columns
+
+```{r}
+b.b <- bird_tdf_sh[grep("branta bernicla", bird_tdf_sh$scientific_name), ] %>% 
+  rescale(ind_col = index, Index_root = 1) %>% 
+  rescale(ind_col = index_sm, Index_root = 1) %>% 
+  group_by(year) %>% 
+  summarise(across(index:index_sm, ~ geometric(.x))) %>% #throws an NaN in 2020 as missing year for both species
+  mutate(index = ifelse(is.nan(index), NA, index)) %>% #change to NA
+  mutate(scientific_name = "branta bernicla", common_name = "brent goose",
+         .id = "wwbi", index_orig = NA) 
+
+#create copy of white front time-series and label at specific level
+a.a <- bird_tdf_sh[grep("anser albifrons", bird_tdf_sh$scientific_name), ] %>% 
+  mutate(scientific_name = "anser albifrons", common_name = "white-fronted goose", 
+         .id = "wwbi", index_orig = index)
+
+#remove brent subsp hrota and add copy of white front and brent at species level
+#to the freeman dataset
+bird_tdf_sh1 <- bird_tdf_sh %>% 
+  filter(!(scientific_name == "branta bernicla subsp. hrota s")) %>% 
+  full_join(b.b) %>% 
+  full_join(a.a)#add goose spp to dataset
+
+rm(b.b, a.a)
+```
+
+Let's plot that to see what the average trends look like
+```{r, fig.width = 12}
+geese_pro <- bird_tdf_sh1[grep("goose", as.character(bird_tdf_sh1$common_name)), ]
+
+ggplot(geese_pro, aes(x = year, colour = scientific_name)) +
+  geom_line(aes( y = index)) +
+  geom_line(aes(y = index_sm), lty = 3) +
+  facet_wrap(vars(scientific_name), nrow = 2, scales = "free_y") 
+```
+
+# CHECKS 
+
+-   Check for missing data
+
+```{r}
+bird_tdf_sh1 %>% 
+  summarise(sci = sum(is.na(scientific_name)), com = sum(is.na(common_name)), year = sum(is.na(year)), ind = sum(is.na(index)), sur = sum(is.na(.id)))
+```
+
+-   How many species per survey
+
+```{r}
+ddply(bird_tdf_sh1, .(.id), summarise,      n_distinct(scientific_name))
+```
+
+-   Are there any duplicate spp yr combs?
+
+```{r}
+a1 <- bird_tdf_sh1 %>% 
+  group_by(scientific_name, year) %>% 
+  summarise(n = n())
+a1[a1$n >1, ]
+
+b1 <- bird_tdf_sh1 %>% 
+  group_by(common_name, year) %>% 
+  summarise(n = n())
+b1[b1$n >1, ]
+```
+
+-   Nothing detected
+
+A couple of species names are not proper latin names  \  
+- Eider and Greylag, Bits in brackets not needed
+```{r}
+bird_tdf_sh1 <- bird_tdf_sh1 %>% 
+  mutate(scientific_name = gsub("\\s*\\([^\\)]+\\)","", scientific_name)) 
+```
+
+## Save final bird data file 
+
+```{r, eval=FALSE}
+write.csv(bird_tdf_sh1, file = "/data/tidy_data/intermediate_files/bird_compiled_engto24_120326.csv", 
+          row.names = FALSE)
+```
+
+From comparison to the bird dataset running to 2023  - The species
+composition at this point is the same but with redpoll rather than
+lesser redpoll - All species have the same data sources barring change
+in seabirds
